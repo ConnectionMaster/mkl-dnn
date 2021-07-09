@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -122,6 +122,8 @@ bool primitive_attr_t::has_default_values(dnnl_primitive_attr::skip_mask_t mask,
     smask_t defined_mask {};
     if ((mask & smask_t::oscale_runtime) == smask_t::oscale_runtime)
         defined_mask |= smask_t::oscale;
+    if ((mask & smask_t::scales_runtime) == smask_t::scales_runtime)
+        defined_mask |= smask_t::scales;
     if ((mask & smask_t::zero_points_runtime) == smask_t::zero_points_runtime)
         defined_mask |= smask_t::zero_points;
     bool ok = true;
@@ -153,6 +155,7 @@ bool primitive_attr_t::defined(dnnl_primitive_attr::skip_mask_t mask) const {
 #define CHECK_MASK(mask_name, mask_field) \
     CHECK_ARG(IMPLICATION((bool)(~mask & (mask_name)), (mask_field).defined()))
     CHECK_MASK(smask_t::oscale, output_scales_);
+    CHECK_MASK(smask_t::scales, scales_);
     CHECK_MASK(smask_t::zero_points, zero_points_);
     CHECK_MASK(smask_t::post_ops, post_ops_);
     CHECK_MASK(smask_t::rnn_data_qparams, rnn_data_qparams_);
@@ -164,12 +167,14 @@ bool primitive_attr_t::defined(dnnl_primitive_attr::skip_mask_t mask) const {
 #undef CHECK_ARG
 }
 
-status_t post_ops_t::append_sum(float scale, data_type_t dt) {
+status_t post_ops_t::append_sum(
+        float scale, int32_t zero_point, data_type_t dt) {
     if (len() == post_ops_limit) return out_of_memory;
     entry_.emplace_back();
     auto &e = entry_.back();
     e.kind = primitive_kind::sum;
     e.sum.scale = scale;
+    e.sum.zero_point = zero_point;
     e.sum.dt = dt;
     return success;
 }
@@ -250,17 +255,18 @@ status_t post_ops_t::append_dw_k3s2p1(data_type_t wei_dt, data_type_t bias_dt,
 }
 
 status_t post_ops_t::append_binary(
-        alg_kind_t alg, const memory_desc_t *src1_desc) {
+        alg_kind_t alg, const memory_desc_t *user_src1_desc) {
     if (len() == post_ops_limit) return out_of_memory;
     using namespace alg_kind;
     bool alg_ok = one_of(alg, binary_add, binary_mul, binary_max, binary_min,
-            binary_div, binary_sub);
+            binary_div, binary_sub, binary_ge, binary_gt, binary_le, binary_lt,
+            binary_eq, binary_ne);
     if (!alg_ok) return invalid_arguments;
-    if (!memory_desc_sanity_check(src1_desc)) return invalid_arguments;
+    if (!memory_desc_sanity_check(user_src1_desc)) return invalid_arguments;
 
     // Additional check to restrict run-time dimension usage until supported.
-    for (int d = 0; d < src1_desc->ndims; ++d) {
-        if (src1_desc->dims[d] == DNNL_RUNTIME_DIM_VAL)
+    for (int d = 0; d < user_src1_desc->ndims; ++d) {
+        if (user_src1_desc->dims[d] == DNNL_RUNTIME_DIM_VAL)
             return invalid_arguments;
     }
 
@@ -268,7 +274,8 @@ status_t post_ops_t::append_binary(
     auto &e = entry_.back();
     e.kind = primitive_kind::binary;
     e.binary.alg = alg;
-    e.binary.src1_desc = *src1_desc;
+    e.binary.user_src1_desc = *user_src1_desc;
+    e.binary.src1_desc = *user_src1_desc;
     return success;
 }
 
@@ -294,6 +301,28 @@ bool post_ops_t::defined() const {
     return true;
 }
 
+status_t post_ops_t::set_default_formats(const memory_desc_t *dst_md) {
+    for (int idx = 0; idx < len(); ++idx) {
+        if (!contain(primitive_kind::binary, idx)) continue;
+
+        auto &src1_md = entry_[idx].binary.src1_desc;
+        const memory_desc_wrapper src1_mdw(src1_md);
+        if (!src1_mdw.format_any()) continue;
+
+        const memory_desc_wrapper dst_mdw(dst_md);
+        assert(!dst_mdw.format_any());
+
+        // 1D tensors should be plain abx.
+        if (src1_mdw.count_non_unit_dims(1))
+            CHECK(memory_desc_init_by_strides(src1_md, nullptr));
+        else
+            CHECK(memory_desc_init_by_blocking_desc(
+                    src1_md, dst_mdw.blocking_desc()));
+    }
+
+    return status::success;
+}
+
 status_t primitive_attr_t::set_scratchpad_mode(
         scratchpad_mode_t scratchpad_mode) {
     using namespace dnnl::impl::scratchpad_mode;
@@ -307,6 +336,10 @@ status_t primitive_attr_t::set_scratchpad_mode(
 
 status_t primitive_attr_t::set_post_ops(const post_ops_t &post_ops) {
     return post_ops_.copy_from(post_ops);
+}
+
+status_t primitive_attr_t::set_default_formats(const memory_desc_t *dst_md) {
+    return post_ops_.set_default_formats(dst_md);
 }
 
 /* Public C API */
@@ -452,7 +485,14 @@ status_t dnnl_post_ops_append_sum_v2(
         post_ops_t *post_ops, float scale, data_type_t dt) {
     if (post_ops == nullptr) return invalid_arguments;
 
-    return post_ops->append_sum(scale, dt);
+    return post_ops->append_sum(scale, 0, dt);
+}
+
+status_t dnnl_post_ops_append_sum_v3(
+        post_ops_t *post_ops, float scale, int32_t zero_point, data_type_t dt) {
+    if (post_ops == nullptr) return invalid_arguments;
+
+    return post_ops->append_sum(scale, zero_point, dt);
 }
 
 namespace {
@@ -478,12 +518,23 @@ status_t dnnl_post_ops_get_params_sum(
 status_t dnnl_post_ops_get_params_sum_v2(
         const post_ops_t *post_ops, int index, float *scale, data_type_t *dt) {
     bool ok = true
-            && simple_get_params_check(post_ops, index, primitive_kind::sum)
-            && !any_null(scale);
+            && simple_get_params_check(post_ops, index, primitive_kind::sum);
     if (!ok) return invalid_arguments;
 
-    *scale = post_ops->entry_[index].sum.scale;
-    *dt = post_ops->entry_[index].sum.dt;
+    if (scale) *scale = post_ops->entry_[index].sum.scale;
+    if (dt) *dt = post_ops->entry_[index].sum.dt;
+    return success;
+}
+
+status_t dnnl_post_ops_get_params_sum_v3(const post_ops_t *post_ops, int index,
+        float *scale, int32_t *zero_point, data_type_t *dt) {
+    bool ok = true
+            && simple_get_params_check(post_ops, index, primitive_kind::sum);
+    if (!ok) return invalid_arguments;
+
+    if (scale) *scale = post_ops->entry_[index].sum.scale;
+    if (zero_point) *zero_point = post_ops->entry_[index].sum.zero_point;
+    if (dt) *dt = post_ops->entry_[index].sum.dt;
     return success;
 }
 
@@ -567,20 +618,20 @@ status_t dnnl_post_ops_get_params_dw_k3s2p1(const post_ops_t *post_ops,
 }
 
 status_t dnnl_post_ops_append_binary(post_ops_t *post_ops, alg_kind_t alg_kind,
-        const memory_desc_t *src1_desc) {
+        const memory_desc_t *user_src1_desc) {
     if (post_ops == nullptr) return invalid_arguments;
 
-    return post_ops->append_binary(alg_kind, src1_desc);
+    return post_ops->append_binary(alg_kind, user_src1_desc);
 }
 
 status_t dnnl_post_ops_get_params_binary(const post_ops_t *post_ops, int index,
-        alg_kind_t *alg_kind, const dnnl_memory_desc_t **src1_desc) {
+        alg_kind_t *alg_kind, const dnnl_memory_desc_t **user_src1_desc) {
     if (!simple_get_params_check(post_ops, index, primitive_kind::binary))
         return invalid_arguments;
 
     const auto &b = post_ops->entry_[index].binary;
     if (alg_kind) *alg_kind = b.alg;
-    if (src1_desc) *src1_desc = &b.src1_desc;
+    if (user_src1_desc) *user_src1_desc = &b.user_src1_desc;
 
     return success;
 }

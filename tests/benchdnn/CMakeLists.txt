@@ -1,5 +1,5 @@
 #===============================================================================
-# Copyright 2017-2020 Intel Corporation
+# Copyright 2017-2021 Intel Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,12 +22,12 @@ file(GLOB_RECURSE SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp
     )
 list(APPEND SOURCES ${TEST_THREAD})
-include_directories(
+include_directories_with_host_compiler(
     ${CMAKE_CURRENT_SOURCE_DIR}
     )
 
 if(BENCHDNN_USE_RDPMC)
-    add_definitions(-DBENCHDNN_USE_RDPMC)
+    add_definitions_with_host_compiler(-DBENCHDNN_USE_RDPMC)
 endif()
 
 if(CMAKE_CXX_COMPILER_ID STREQUAL "Intel")
@@ -55,8 +55,13 @@ function(register_benchdnn_test engine driver test_file)
         message(ERROR "Incorrect use of function")
     endif()
 
+    set(test_mode "C")
+    if(DNNL_TEST_SET EQUAL DNNL_TEST_SET_CI_NO_CORR)
+        set(test_mode "R")
+    endif()
+
     string(REPLACE "test_" "test_benchdnn_" target_name ${test_file})
-    set(cmd "-v1 --engine=${engine} --${driver} --batch=${test_file}")
+    set(cmd "--mode=${test_mode} -v1 --engine=${engine} --${driver} --batch=${test_file}")
     set(benchdnn_target ${target_name}_${engine})
 
     if(DNNL_BUILD_FOR_CI)
@@ -100,8 +105,12 @@ set(has_gpu false)
 if(NOT DNNL_GPU_RUNTIME STREQUAL "NONE")
     set(has_gpu true)
 endif()
+set(has_cpu false)
+if(NOT DNNL_CPU_RUNTIME STREQUAL "NONE")
+    set(has_cpu true)
+endif()
 
-# Very sad CMake 2.8.11 does not support continue() command.
+# Very sad CMake older then 3.2 does not support continue() command.
 file(GLOB all_drivers RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}/inputs inputs/*)
 foreach(driver ${all_drivers})
     set(driver_dir ${CMAKE_CURRENT_SOURCE_DIR}/inputs/${driver})
@@ -115,7 +124,7 @@ foreach(driver ${all_drivers})
     file(GLOB test_files_cpu RELATIVE ${driver_dir} inputs/${driver}/test_*)
 
     # Register ci input files for ci only
-    if(DNNL_TEST_SET EQUAL DNNL_TEST_SET_CI)
+    if((DNNL_TEST_SET LESS DNNL_TEST_SET_CI) OR (DNNL_TEST_SET EQUAL DNNL_TEST_SET_CI))
         # gpu_ci files may happen if cpu coverage can not be used on gpu
         # Filter out gpu_ci inputs from ci
         foreach(test_file ${test_files_gpu_ci})
@@ -130,7 +139,9 @@ foreach(driver ${all_drivers})
                 register_all_tests(gpu "${driver}" "${test_files_ci}")
             endif()
         endif()
-        register_all_tests(cpu "${driver}" "${test_files_ci}")
+        if(has_cpu)
+            register_all_tests(cpu "${driver}" "${test_files_ci}")
+        endif()
     endif()
 
     # Register nightly input files
@@ -141,12 +152,14 @@ foreach(driver ${all_drivers})
             string(REPLACE "${test_file}" "" test_files_cpu "${test_files_cpu}")
         endforeach()
 
-        if(NOT DNNL_USE_CLANG_SANITIZER)
+        if(has_cpu AND NOT DNNL_USE_CLANG_SANITIZER)
             register_all_tests(cpu "${driver}" "${test_files_large_cpu}")
         endif()
         if(has_gpu)
             register_all_tests(gpu "${driver}" "${test_files_gpu}")
         endif()
-        register_all_tests(cpu "${driver}" "${test_files_cpu}")
+        if(has_cpu)
+            register_all_tests(cpu "${driver}" "${test_files_cpu}")
+        endif()
     endif()
 endforeach()

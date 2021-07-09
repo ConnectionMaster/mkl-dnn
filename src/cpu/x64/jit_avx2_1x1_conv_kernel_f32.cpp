@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2021 Intel Corporation
 * Copyright 2018 YANDEX LLC
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
@@ -16,6 +16,7 @@
 *******************************************************************************/
 
 #include <assert.h>
+#include <limits>
 
 #include "common/c_types_map.hpp"
 #include "common/memory.hpp"
@@ -345,6 +346,7 @@ void jit_avx2_1x1_conv_kernel_f32::generate_reduce_loop(
                 jmp(load_init_done);
 
                 L(load_init_tail);
+                vxorps(vreg_load(i), vreg_load(i), vreg_load(i));
                 load_bytes(vreg_load(i), aux_reg_load_data,
                         get_load_offset_bwd_w(0, i),
                         load_dim_tail * sizeof(float));
@@ -396,6 +398,8 @@ void jit_avx2_1x1_conv_kernel_f32::generate_reduce_loop(
             push(aux_reg_bcast_data);
         }
 
+        const auto is_padding = jcp.oc_without_padding != jcp.oc;
+        if (is_padding) uni_vxorps(vtmp, vtmp, vtmp);
         for (int j = 0; j < ur; ++j)
             for (int i = 0; i < load_loop_blk; ++i) {
                 if (load_dim_tail > 0 && i == load_loop_blk - 1) {
@@ -420,10 +424,14 @@ void jit_avx2_1x1_conv_kernel_f32::generate_reduce_loop(
                         lea(reg_tmp,
                                 ptr[aux_reg_output_data
                                         + reg_tmp_output_stride]);
-                        store_bytes(vreg_accum(load_loop_blk, i, j), reg_tmp,
-                                get_output_offset(i, j),
-                                load_dim_tail * sizeof(float));
+                        vmovups(output_ptr(i, j),
+                                vreg_accum(load_loop_blk, i, j));
                     } else {
+                        if (is_padding && jcp.with_binary) {
+                            vmovups(ptr[aux_reg_output_data
+                                            + get_output_offset(i, j)],
+                                    vtmp);
+                        }
                         store_bytes(vreg_accum(load_loop_blk, i, j),
                                 aux_reg_output_data, get_output_offset(i, j),
                                 load_dim_tail * sizeof(float));
@@ -466,6 +474,7 @@ void jit_avx2_1x1_conv_kernel_f32::generate_reduce_loop(
                             jmp(fma_load_done);
 
                             L(fma_load_tail);
+                            vxorps(vreg_load(i), vreg_load(i), vreg_load(i));
                             load_bytes(vreg_load(i), aux_reg_load_data,
                                     get_load_offset_bwd_w(u + 1, i),
                                     load_dim_tail * sizeof(float));
@@ -785,8 +794,12 @@ status_t jit_avx2_1x1_conv_kernel_f32::init_conf(jit_1x1_conv_conf_t &jcp,
     using namespace injector;
     static constexpr bool sum_at_pos_0_only = true;
     static constexpr bool sum_requires_scale_one = true;
+    static constexpr bool sum_requires_zp_zero = true;
     const bool post_ops_ok_ = post_ops_ok({avx2, {eltwise, binary, sum},
-            jcp.post_ops, &dst_d, sum_at_pos_0_only, sum_requires_scale_one});
+            jcp.post_ops, &dst_d, sum_at_pos_0_only, sum_requires_scale_one,
+            sum_requires_zp_zero,
+            {broadcasting_strategy_t::scalar,
+                    broadcasting_strategy_t::per_oc}});
     if (!post_ops_ok_) return status::unimplemented;
 
     bool args_ok = true && jcp.ngroups == 1 && jcp.src_tag == dat_tag
@@ -987,6 +1000,14 @@ status_t jit_avx2_1x1_conv_kernel_f32::init_conf(jit_1x1_conv_conf_t &jcp,
     jcp.nb_bcast = div_up(jcp.bcast_dim, jcp.bcast_block);
     jcp.nb_load = div_up(jcp.load_dim, jcp.load_block);
     jcp.nb_reduce = div_up(jcp.reduce_dim, jcp.reduce_block);
+
+    if (jcp.prop_kind == backward_weights) {
+        const auto mb_with_nb_reduce
+                = static_cast<dim_t>(jcp.mb) * jcp.nb_reduce;
+        // prevent too large argument to cpu reducer
+        if (mb_with_nb_reduce > std::numeric_limits<int>::max())
+            return status::unimplemented;
+    }
 
     return status::success;
 }

@@ -14,7 +14,7 @@
 # limitations under the License.
 #===============================================================================
 
-cmake_minimum_required(VERSION 2.8.11)
+cmake_minimum_required(VERSION 2.8.12)
 
 if(POLICY CMP0022)
     cmake_policy(SET CMP0022 NEW)
@@ -67,14 +67,26 @@ endif()
 if("${CMAKE_BUILD_TYPE}" STREQUAL "")
     message(STATUS "CMAKE_BUILD_TYPE is unset, defaulting to Release")
     set(CMAKE_BUILD_TYPE "Release" CACHE STRING
-        "Choose the type of build, options are: None Debug Release RelWithDebInfo MinSizeRel RelWithAssert ...")
+        "Choose the type of build, options are: None Debug Release RelWithDebInfo MinSizeRel RelWithAssert RelWithMDd...")
 endif()
 
 set(PROJECT_NAME "oneDNN")
 set(PROJECT_FULL_NAME "oneAPI Deep Neural Network Library (oneDNN)")
-set(PROJECT_VERSION "2.1.0")
+set(PROJECT_VERSION "2.3.0")
 
-set(LIB_NAME dnnl)
+function(set_lib_name LIB_NAME)
+    string(TOUPPER "${CMAKE_BUILD_TYPE}" UPPERCASE_CMAKE_BUILD_TYPE)
+    if(WIN32 AND DNNL_INSTALL_MODE STREQUAL "BUNDLE"
+             AND UPPERCASE_CMAKE_BUILD_TYPE STREQUAL "RELWITHMDD"
+             AND DNNL_CPU_RUNTIME MATCHES "(DPCPP|SYCL)"
+             AND DNNL_GPU_RUNTIME MATCHES "(DPCPP|SYCL)")
+        set(LIB_NAME "dnnld" PARENT_SCOPE)
+    else()
+        set(LIB_NAME "dnnl" PARENT_SCOPE)
+    endif()
+endfunction()
+
+set_lib_name(LIB_NAME)
 
 if (CMAKE_VERSION VERSION_LESS 3.0)
     project(${PROJECT_NAME} C CXX)
@@ -106,11 +118,6 @@ set(CMAKE_SRC_CCXX_FLAGS)       # SRC specifics
 set(CMAKE_EXAMPLE_CCXX_FLAGS)   # EXAMPLE specifics
 set(CMAKE_TEST_CCXX_FLAGS)      # TESTS specifics
 
-if(UNIX OR MINGW)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c99")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
-endif()
-
 include("cmake/mkldnn_compat.cmake")
 
 include("cmake/utils.cmake")
@@ -129,6 +136,15 @@ include("cmake/version.cmake")
 include("cmake/coverage.cmake")
 include("cmake/build_types.cmake")
 include("cmake/testing.cmake")
+include("cmake/host_compiler.cmake")
+
+if(UNIX OR MINGW)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c99")
+    # Let SYCL to choose the C++ standard it needs.
+    if(NOT DNNL_WITH_SYCL)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+    endif()
+endif()
 
 # Handle cases when OpenMP runtime is requested but not found: override CPU
 # runtime to be sequential
@@ -139,23 +155,13 @@ endif()
 
 enable_testing()
 
-include_directories(include)
-
-if(DNNL_CPU_SYCL)
-    if(TBB_FOUND)
-        set(DNNL_CPU_THREADING_RUNTIME "TBB")
-    else()
-        set(DNNL_CPU_THREADING_RUNTIME "SEQ")
-    endif()
-else()
-    set(DNNL_CPU_THREADING_RUNTIME "${DNNL_CPU_RUNTIME}")
-endif()
+include_directories_with_host_compiler(${PROJECT_SOURCE_DIR}/include)
 
 configure_file(
     "${PROJECT_SOURCE_DIR}/include/oneapi/dnnl/dnnl_config.h.in"
     "${PROJECT_BINARY_DIR}/include/oneapi/dnnl/dnnl_config.h"
 )
-include_directories(${PROJECT_BINARY_DIR}/include)
+include_directories_with_host_compiler(${PROJECT_BINARY_DIR}/include)
 
 configure_file(
     "${PROJECT_SOURCE_DIR}/README.binary.in"

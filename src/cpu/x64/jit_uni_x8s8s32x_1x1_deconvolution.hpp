@@ -1,10 +1,10 @@
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
 * You may obtain a copy of the License at
-* 
+*
 *     http://www.apache.org/licenses/LICENSE-2.0
 *
 * Unless required by applicable law or agreed to in writing, software
@@ -29,6 +29,7 @@
 
 #include "cpu/x64/jit_uni_1x1_conv_utils.hpp"
 #include "cpu/x64/jit_uni_x8s8s32x_1x1_convolution.hpp"
+#include "cpu/zero_point_utils.hpp"
 
 namespace dnnl {
 namespace impl {
@@ -53,47 +54,51 @@ struct jit_uni_x8s8s32x_1x1_deconvolution_fwd_t : public primitive_t {
 
         status_t init_convolution(engine_t *engine) {
             convolution_desc_t cd;
-            status_t status;
 
             auto dd = desc();
-            status = conv_desc_init(&cd, prop_kind::forward_training,
+            CHECK(conv_desc_init(&cd, prop_kind::forward_training,
                     alg_kind::convolution_direct, &(dd->src_desc),
                     &(dd->weights_desc), &(dd->bias_desc), &(dd->dst_desc),
-                    dd->strides, dd->dilates, dd->padding[0], dd->padding[1]);
+                    dd->strides, dd->dilates, dd->padding[0], dd->padding[1]));
 
-            if (status == status::success) {
-                primitive_desc_t *_conv_pd = nullptr;
-                primitive_attr_t conv_attr(*attr());
-                if (!conv_attr.is_initialized()) return status::out_of_memory;
-                conv_attr.set_scratchpad_mode(scratchpad_mode::user);
-                status = primitive_desc_t::create<conv_pd_t>(&_conv_pd,
-                        (op_desc_t *)&cd, &conv_attr, engine, nullptr);
-                conv_pd_.reset(_conv_pd);
+            primitive_attr_t conv_attr(*attr());
+            if (!conv_attr.is_initialized()) return status::out_of_memory;
+            dnnl_primitive_desc_iterator it(
+                    engine, (op_desc_t *)&cd, &conv_attr, nullptr);
+            if (!it.is_initialized()) return status::out_of_memory;
+
+            while (++it != it.end()) {
+                conv_pd_ = *it;
+                // XXX: find another way to create required implementation.
+                if (dynamic_cast<conv_pd_t *>(conv_pd_.get()))
+                    return set_default_params();
             }
 
-            if (status == status::success) status = set_default_params();
-
-            return status;
+            return status::unimplemented;
         };
 
         status_t init(engine_t *engine) {
-            bool ok = true && is_fwd()
+            using namespace data_type;
+            using skip_mask_t = primitive_attr_t::skip_mask_t;
+            bool ok = is_fwd()
                     && desc()->alg_kind == alg_kind::deconvolution_direct
                     && !has_zero_dim_memory()
                     && desc()->src_desc.data_type == src_type
                     && desc()->dst_desc.data_type == dst_type
-                    && desc()->weights_desc.data_type == data_type::s8
+                    && desc()->weights_desc.data_type == s8
                     && IMPLICATION(with_bias(),
-                            utils::one_of(desc()->bias_desc.data_type,
-                                    data_type::f32, data_type::s32,
-                                    data_type::s8, data_type::u8))
-                    && desc()->accum_data_type == data_type::s32
-                    && attr()->has_default_values(
-                            primitive_attr_t::skip_mask_t::oscale
-                            | primitive_attr_t::skip_mask_t::post_ops);
+                            utils::one_of(desc()->bias_desc.data_type, f32, s32,
+                                    s8, u8))
+                    && desc()->accum_data_type == s32
+                    && attr()->has_default_values(skip_mask_t::oscale
+                            | skip_mask_t::post_ops
+                            | skip_mask_t::zero_points_runtime)
+                    && zero_points_valid(
+                            attr(), true /*per_oc_bcast_accepted*/);
             if (!ok) return status::unimplemented;
 
             CHECK(init_convolution(engine));
+            CHECK(attr_.set_default_formats(dst_md(0)));
             init_scratchpad();
 
             return status::success;
@@ -113,7 +118,7 @@ struct jit_uni_x8s8s32x_1x1_deconvolution_fwd_t : public primitive_t {
                 src_type, dst_type>::pd_t;
         friend jit_uni_x8s8s32x_1x1_deconvolution_fwd_t;
 
-        std::unique_ptr<primitive_desc_t> conv_pd_;
+        std::shared_ptr<primitive_desc_t> conv_pd_;
 
     private:
         void init_scratchpad() {

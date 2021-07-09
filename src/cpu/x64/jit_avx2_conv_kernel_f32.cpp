@@ -21,6 +21,7 @@
 #include "common/type_helpers.hpp"
 #include "common/utils.hpp"
 
+#include "cpu/platform.hpp"
 #include "cpu/x64/injectors/injector_utils.hpp"
 #include "cpu/x64/injectors/jit_uni_binary_injector.hpp"
 #include "cpu/x64/injectors/jit_uni_eltwise_injector.hpp"
@@ -430,13 +431,21 @@ void jit_avx2_conv_fwd_kernel_f32::width_blk_step(
     apply_postops(oc_blocks, ur_w, oc_tail);
 
     auto store_output = [=](bool is_tail, int tail) {
+        const auto is_padding = jcp.oc_without_padding != jcp.oc;
+        if (is_padding) uni_vxorps(ytmp, ytmp, ytmp);
         for (int ii = 0; ii < oc_blocks; ii++)
             for (int jj = 0; jj < ur_w; jj++) {
                 Ymm reg_out = get_ymm(ur_w, ii, jj);
-                if (is_tail && ii == oc_blocks - 1)
+                if (is_tail && ii == oc_blocks - 1) {
+                    if (is_padding && jcp.with_binary) {
+                        vmovups(make_safe_addr(reg_output,
+                                        get_output_offset(ii, jj),
+                                        reg_long_offt),
+                                ytmp);
+                    }
                     store_bytes(reg_out, reg_output, get_output_offset(ii, jj),
                             tail * sizeof(float));
-                else
+                } else
                     vmovups(make_safe_addr(reg_output,
                                     get_output_offset(ii, jj), reg_long_offt),
                             reg_out);
@@ -580,6 +589,7 @@ status_t jit_avx2_conv_fwd_kernel_f32::init_conf(jit_conv_conf_t &jcp,
         const memory_desc_wrapper &weights_d, const memory_desc_wrapper &dst_d,
         const primitive_attr_t &attr) {
     if (!mayiuse(avx)) return status::unimplemented;
+    jcp.isa = mayiuse(avx2) ? avx2 : avx;
 
     jcp.nthr = dnnl_get_max_threads();
 
@@ -691,8 +701,12 @@ status_t jit_avx2_conv_fwd_kernel_f32::init_conf(jit_conv_conf_t &jcp,
     using namespace injector;
     static constexpr bool sum_at_pos_0_only = true;
     static constexpr bool sum_requires_scale_one = true;
+    static constexpr bool sum_requires_zp_zero = true;
     const bool post_ops_ok_ = post_ops_ok({avx2, {eltwise, binary, sum},
-            jcp.post_ops, &dst_d, sum_at_pos_0_only, sum_requires_scale_one});
+            jcp.post_ops, &dst_d, sum_at_pos_0_only, sum_requires_scale_one,
+            sum_requires_zp_zero,
+            {broadcasting_strategy_t::scalar,
+                    broadcasting_strategy_t::per_oc}});
     if (!post_ops_ok_) return status::unimplemented;
 
     bool args_ok = true

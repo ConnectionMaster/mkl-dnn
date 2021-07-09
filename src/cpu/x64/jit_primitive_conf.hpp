@@ -17,6 +17,7 @@
 #ifndef CPU_X64_JIT_PRIMITIVE_CONF_HPP
 #define CPU_X64_JIT_PRIMITIVE_CONF_HPP
 
+#include <queue>
 #include <stdint.h>
 
 #include "common/primitive_attr.hpp"
@@ -109,13 +110,17 @@ struct jit_conv_conf_t {
     bool with_eltwise;
     bool with_binary;
 
+    bool with_binary_per_oc_bcast;
+    bool with_binary_no_bcast;
+
     bool is_fused_conv;
     int dw_conv_buffer_oc;
 
     post_ops_t::entry_t::eltwise_t eltwise;
     post_ops_t post_ops;
+    bool is_fast_postops; // maybe skip injector for sum and/or relu
 
-    int nthr, nthr_mb, nthr_g, nthr_oc_b, nthr_ic_b;
+    int nthr, nthr_mb, nthr_g, nthr_oc_b, nthr_ic_b, nthr_oh;
 
     int idp, ihp, iwp, ohp, owp;
     int nb_ic, ic_block;
@@ -130,7 +135,7 @@ struct jit_conv_conf_t {
     int nb_ic_L2;
     int h_blocking;
     int nb_oc_L2;
-    int ic_tail, oc_tail;
+    int ic_tail, oc_tail, ch_tail;
     int ur_h, ur_w;
     int ur_w_tail, ur_w_blocks;
     int ur_ic, ur_kw;
@@ -186,19 +191,23 @@ struct jit_conv_conf_t {
     float wei_adj_scale;
     // zero-point compensation
     bool src_zero_point;
+    int zp_pbuff_size;
     bool dst_zero_point;
     bool zp_src_is_common; // common, otherwise (TODO) per-channel
     bool req_zero_point_buffer; // used for calculating padding compensation
-    int ow_pad, oh_pad; // output elements with padding & filter overlap
+    bool zp_pbuff_outer_compute; // indicates if zp_bbuff is computed in
+    // a separate parallel region
+    int ow_pad, oh_pad, od_pad; // output elements with padding & filter overlap
 
     //output elements requiring zero-point padding compensation
+    int f_pad_output, back_pad_output;
     int t_pad_output, b_pad_output;
     int l_pad_output, r_pad_output;
     // The number of output blocks corresponding to {l_pad, no_pad, r_pad}
     int l_pad_blk, no_pad_w_blk, r_pad_blk;
 
-    bool oh_mid, ow_mid; // indicate if there is overlap between the width and
-            // height padded regions
+    bool od_mid, oh_mid, ow_mid; // indicate if there is overlap between the
+            //width and height padded regions
 
     size_t h_blk_limits[5]; // pre-computed limits for output height block
 
@@ -239,9 +248,9 @@ struct jit_conv_conf_t {
 
     int per_one_pstore;
 
-    int inp_buffer_size;
-    int wei_buffer_size;
-    int wsp_buffer_size;
+    size_t inp_buffer_size;
+    size_t wei_buffer_size;
+    size_t wsp_buffer_size;
 
     int nb_os;
     int nb_os_blocking;
@@ -249,6 +258,8 @@ struct jit_conv_conf_t {
     int os_tail;
     int os_blocked;
     int max_width;
+
+    bool transform_to_vnni;
 };
 
 // calculates filter size taking into account dilation
@@ -484,6 +495,11 @@ struct jit_deconv_call_s {
     const void *bias; /* hack, non-const for backward_bias */
     const void *scales;
     const void *compensation;
+    const int32_t *zp_src_pad_str_compensation;
+    const int32_t *zp_compensation;
+    const int32_t *src_zero_point;
+    const int32_t *dst_zero_point;
+
     /*
      * ptr to table of void * elements that are pointers to post_op binary
      * src1 tensors
@@ -551,7 +567,6 @@ struct jit_1x1_conv_conf_t {
     bool with_dw_conv;
 
     post_ops_t post_ops;
-    post_ops_t::entry_t::eltwise_t eltwise;
 
     int is, os;
     int ic_block, oc_block;
@@ -696,6 +711,7 @@ struct jit_pool_call_s {
 struct jit_resampling_conf_t {
     unsigned ndims = 0;
 
+    unsigned c = 0;
     unsigned id = 0, ih = 0, iw = 0;
     unsigned od = 0, oh = 0, ow = 0;
 
@@ -703,9 +719,6 @@ struct jit_resampling_conf_t {
     unsigned stride_h = 0;
     unsigned stride_w = 0;
     unsigned inner_stride = 0;
-
-    unsigned tail = 0;
-    unsigned simd_w = 0;
 
     // The linear algorithm is an approximation of the point
     // value based on the limit values. For one dimension,
@@ -716,14 +729,27 @@ struct jit_resampling_conf_t {
     unsigned number_of_corners = 0;
 
     bool is_data_size_bigger_than_L3 = false;
-    data_type_t data_type = data_type::undef;
-    size_t dt_size = 0;
+    bool is_saturation_needed = false;
+    data_type_t src_data_type = data_type::undef;
+    data_type_t dst_data_type = data_type::undef;
+    size_t src_dt_size = 0;
+    size_t dst_dt_size = 0;
+    size_t output_data_size = 0;
     size_t el_size_of_indices = 0;
 
+    bool is_blocked_8_format = false;
+    format_tag_t src_tag = format_tag::undef;
     jit_memory_tag_kind_t tag_kind = jit_memory_tag_kind_t::undef;
     alg_kind_t alg = alg_kind::undef;
 
     cpu_isa_t isa = isa_any;
+
+    post_ops_t post_ops = post_ops_t();
+    bool with_postops = false;
+    bool with_eltwise = false;
+    bool with_binary = false;
+    bool with_sum = false;
+    std::queue<float> sum_scales;
 };
 
 struct jit_resampling_call_s {
@@ -733,6 +759,9 @@ struct jit_resampling_call_s {
     const void *dst = nullptr;
     const void *indices = nullptr;
     const void *weights = nullptr;
+    const void *post_ops_binary_rhs_arg_vec = nullptr;
+
+    size_t c_offset = 0;
 
     size_t src_offset_top = 0;
     size_t src_offset_bottom = 0;
@@ -783,8 +812,10 @@ struct jit_brgemm_conv_conf_t {
     bool with_bias;
     bool with_sum;
     bool with_eltwise;
+    bool with_binary;
+
     bool is_fused_conv;
-    post_ops_t::entry_t::eltwise_t eltwise;
+    bool is_os_blocking;
     int nb_ic, ic_block;
     int nb_oc, oc_block;
     int nb_iw, iw_block;
@@ -822,6 +853,105 @@ struct jit_brgemm_conv_conf_t {
     int max_vpad;
 
     bool wei_plain;
+};
+
+struct jit_shuffle_conf_t {
+    unsigned ndims = 0;
+
+    unsigned mb = 0, c = 0, d = 0, h = 0, w = 0, sp = 0;
+
+    unsigned stride_mb = 0;
+    unsigned blk_size = 0;
+    unsigned group_size = 0;
+    unsigned axis = 0;
+    unsigned axis_size = 0;
+    unsigned simd_tail = 0;
+    unsigned simd_w = 0;
+
+    jit_memory_tag_kind_t tag_kind = jit_memory_tag_kind_t::undef;
+    data_type_t data_type = data_type::undef;
+    size_t dt_size = 0;
+    unsigned el_size_of_indices = 0;
+    dim_t c_split_size = 0;
+    dim_t sp_split_size = 0;
+
+    cpu_isa_t isa = isa_any;
+};
+
+struct jit_shuffle_call_s {
+    const void *src = nullptr;
+    void *dst = nullptr;
+    const void *input_off_ptr = nullptr;
+
+    dim_t cb_loop_size
+            = 0; // number of loop iterations over corresponding C batches
+    bool is_padded_block = false;
+};
+
+enum class binary_op_t : unsigned { none, c_blocked, n_spatial_c, n_c_spatial };
+
+enum class binary_bcast_t : unsigned {
+    none, // tensor operation
+    scalar,
+    per_c,
+    per_w
+};
+
+struct jit_binary_conf_t {
+    binary_op_t op_type = binary_op_t::none;
+    binary_bcast_t bcast_type = binary_bcast_t::none;
+    bool do_scale_src0 = false;
+    bool do_scale_src1 = false;
+    bool do_sum = false;
+    bool with_eltwise = false;
+    bool with_postops = false;
+    float sum_scale = 0.f;
+    bool use_stride_src1 = false;
+    bool broadcast_src1_value = false;
+    bool use_stride_rhs_postops = false;
+    bool postops_per_oc_broadcast_exists = false;
+    bool is_i8 = false;
+    bool is_bf16 = false;
+    bool is_src_different_layouts = false;
+    dim_t outer_dims = 1;
+    int src1_stride = 1;
+
+    data_type_t src0_type = data_type::undef;
+    data_type_t src1_type = data_type::undef;
+    data_type_t dst_type = data_type::undef;
+};
+
+struct jit_binary_call_s {
+    // keep all sizes at 8 bytes -- jit code expects this
+    const void *src0, *src1, *dst, *indices;
+    const float *scales_src0, *scales_src1;
+    size_t spat_offt_count;
+    const void *post_ops_binary_rhs_arg_vec;
+    size_t oc_l_off;
+    size_t src1_stride_range;
+};
+
+struct jit_reduction_conf_t {
+    data_type_t src_type = data_type::undef;
+    data_type_t dst_type = data_type::undef;
+    data_type_t acc_type = data_type::undef;
+
+    std::size_t src_dt_size = 0;
+    std::size_t dst_dt_size = 0;
+    std::size_t acc_dt_size = 0;
+
+    alg_kind_t alg = alg_kind::undef;
+    cpu_isa_t isa = isa_any;
+
+    dim_t idle_size = 0;
+    dim_t reduce_size = 0;
+
+    bool is_saturation_needed = false;
+};
+
+struct jit_reduction_call_s {
+    const void *src = nullptr;
+    void *dst = nullptr;
 };
 
 } // namespace x64

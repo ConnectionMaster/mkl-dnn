@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -29,7 +29,6 @@
 #include "gpu/ocl/rnn/ref_rnn.hpp"
 
 #include "common/c_types_map.hpp"
-#include "common/dnnl_thread.hpp"
 #include "common/dnnl_traits.hpp"
 #include "common/gemm_utils.hpp"
 #include "common/math_utils.hpp"
@@ -589,7 +588,7 @@ status_t _ref_rnn_common_t<aprop>::pd_t::init(engine_t *engine) {
     // Below, we have to transpose the a and b descriptor to describe
     // the GEMM as a row major problem.
     auto create_gemm_pd
-            = [&](std::unique_ptr<primitive_desc_t> &gemm_pd, int m, int n,
+            = [&](std::shared_ptr<primitive_desc_t> &gemm_pd, int m, int n,
                       int k, int lda, int ldb, int ldc, data_type_t a_dt,
                       data_type_t b_dt, data_type_t c_dt, bool is_B_trans,
                       float beta) -> status_t {
@@ -611,8 +610,8 @@ status_t _ref_rnn_common_t<aprop>::pd_t::init(engine_t *engine) {
         dnnl_primitive_desc_iterator it(
                 engine, (op_desc_t *)&gemm_desc, &attr, nullptr);
         if (!it.is_initialized()) return status::out_of_memory;
-        ++it;
-        gemm_pd.reset(it.fetch_once());
+
+        gemm_pd = *(++it);
         if (!gemm_pd) return status::unimplemented;
         return status::success;
     };
@@ -748,8 +747,55 @@ status_t _ref_rnn_common_t<aprop>::pd_t::init(engine_t *engine) {
 
 template <prop_kind_t aprop>
 status_t _ref_rnn_common_t<aprop>::init(engine_t *engine) {
-    compute::kernel_ctx_t kernel_ctx;
+    using namespace rnn_utils;
+    auto assign_funcs = [](gemm_t &g, weights_assign_t &p) {
+        g = &class_name::gemm_primitive;
+        p = &class_name::assign_weights;
+    };
 
+    assign_funcs(gemm_iter_func, weights_iter_assign_func);
+    assign_funcs(gemm_layer_func, weights_layer_assign_func);
+
+    switch (pd()->cell_kind()) {
+        case dnnl_vanilla_lstm:
+            cell_func = &class_name::cell_execution;
+            elemwise_func = pd()->src_type == data_type::u8
+                            && pd()->weights_type == data_type::s8
+                    ? &class_name::lstm_elemwise_u8s8
+                    : &class_name::lstm_elemwise;
+            break;
+        case dnnl_vanilla_rnn:
+            cell_func = &class_name::cell_execution;
+            elemwise_func = &class_name::rnn_elemwise;
+            break;
+        case dnnl_vanilla_gru:
+            cell_func = &class_name::cell_execution_gru;
+            elemwise_func = &class_name::gru_elemwise;
+            break;
+        case dnnl_lbr_gru:
+            cell_func = &class_name::cell_execution_gru_lbr;
+            elemwise_func = &class_name::gru_lbr_elemwise;
+            break;
+        default: break;
+    }
+
+    grid_computation = &class_name::linear_execution;
+
+    size_t scratchpad_size, workspace_size;
+    rnn_utils::set_offsets(pd()->rnn_conf, ws_gates_offset_, ws_states_offset_,
+            ws_c_states_offset_, ws_diff_states_offset_, ws_grid_comp_offset_,
+            scratch_cell_offset_, ws_dhG1_offset_, ws_bias_offset_,
+            scratch_gates_offset_, scratchpad_size, workspace_size);
+    int max_nparts = (pd()->cell_kind() == alg_kind::vanilla_gru) ? 2 : 1;
+    int wei_offsets_iter_sz = pd()->L() * pd()->D() * max_nparts;
+    int wei_offsets_layer_sz = pd()->L() * pd()->D();
+
+    wei_layer_offset_ptr
+            = (size_t *)malloc(sizeof(size_t) * wei_offsets_layer_sz, 64);
+    wei_iter_offset_ptr
+            = (size_t *)malloc(sizeof(size_t) * wei_offsets_iter_sz, 64);
+
+    compute::kernel_ctx_t kernel_ctx;
     status_t status = init_kernel_ctx(kernel_ctx, pd()->conf, pd()->off);
     CHECK(status);
 
@@ -1445,9 +1491,10 @@ status_t _ref_rnn_common_t<aprop>::execute_(const exec_ctx_t &ctx) const {
     // initialize diff_state to 0
     if (aprop == prop_kind::backward) {
         ws_set(ctx, compute_stream, workspace_, ws_dhG1_offset_,
-                rnn_utils::dhG1_gru, 0.0f, rnn.ws_dhG1_size);
+                rnn_utils::dhG1_gru, 0.0f, rnn.ws_dhG1_size / sizeof(float));
         ws_set(ctx, compute_stream, workspace_, ws_diff_states_offset_,
-                rnn_utils::diff_states, 0.0f, rnn.ws_diff_states_size);
+                rnn_utils::diff_states, 0.0f,
+                rnn.ws_diff_states_size / sizeof(float));
     }
 
     DPRINT("\n%s(%d) WS before bias prepare\n\n", __FUNCTION__, __LINE__);

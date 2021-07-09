@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -25,7 +25,9 @@
 #include "primitive.hpp"
 #include "utils.hpp"
 
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_NONE
 #include "cpu/cpu_engine.hpp"
+#endif
 
 #if DNNL_GPU_RUNTIME == DNNL_RUNTIME_OCL
 #include "gpu/ocl/ocl_engine.hpp"
@@ -40,10 +42,14 @@ namespace impl {
 
 static inline std::unique_ptr<engine_factory_t> get_engine_factory(
         engine_kind_t kind, runtime_kind_t runtime_kind) {
+
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_NONE
     if (kind == engine_kind::cpu && is_native_runtime(runtime_kind)) {
         return std::unique_ptr<engine_factory_t>(
                 new cpu::cpu_engine_factory_t());
     }
+#endif
+
 #if DNNL_GPU_RUNTIME == DNNL_RUNTIME_OCL
     if (kind == engine_kind::gpu && runtime_kind == runtime_kind::ocl) {
         return std::unique_ptr<engine_factory_t>(
@@ -86,8 +92,11 @@ status_t dnnl_engine_get_kind(engine_t *engine, engine_kind_t *kind) {
 }
 
 status_t dnnl_engine_destroy(engine_t *engine) {
-    /* TODO: engine->dec_ref_count(); */
+#ifdef DNNL_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
+    if (engine != nullptr) engine->release();
+#else
     delete engine;
+#endif
     return success;
 }
 

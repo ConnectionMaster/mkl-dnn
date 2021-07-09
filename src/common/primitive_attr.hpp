@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -46,8 +46,9 @@ struct rnn_data_qparams_t : public c_compatible {
     }
 
     bool operator==(const rnn_data_qparams_t &rhs) const {
-        bool ret = scale_ == rhs.scale_ && shift_ == rhs.shift_;
-        return ret;
+        using namespace utils;
+        return equal_with_nan(scale_, rhs.scale_)
+                && equal_with_nan(shift_, rhs.shift_);
     }
 
     float scale_;
@@ -67,15 +68,16 @@ struct rnn_tparams_t : public c_compatible {
     }
 
     bool operator==(const rnn_tparams_t &rhs) const {
+        using namespace utils;
+
         bool ret = test_mode_ == rhs.test_mode_ && ngates_ == rhs.ngates_
-                && cscale_ == rhs.cscale_;
+                && equal_with_nan(cscale_, rhs.cscale_);
 
         if (!ret) return ret;
 
         if (scales_) {
-            for (dim_t g = 0; g < ngates_; g++) {
-                if (scales_[g] != rhs.scales_[g]) { return false; }
-            }
+            if (std::memcmp(scales_, rhs.scales_, sizeof(float) * ngates_))
+                return false;
         }
         return true;
     }
@@ -133,7 +135,8 @@ struct scales_t : public c_compatible {
                 && !utils::any_null(scales_, rhs.scales_)
                 && defined() == rhs.defined()
                 && IMPLICATION(defined(),
-                        utils::array_cmp(scales_, rhs.scales_, count_));
+                        !std::memcmp(
+                                scales_, rhs.scales_, sizeof(float) * count_));
         return ret;
     }
 
@@ -197,6 +200,13 @@ struct arg_scales_t : public c_compatible {
         return true;
     }
 
+    bool defined() const {
+        for (const auto &s : scales_) {
+            if (!s.second.defined()) return false;
+        }
+        return true;
+    }
+
     status_t get(int arg, dim_t *count, int *mask, const float **scales) const;
     status_t set(int arg, dim_t count, int mask, const float *scales);
     status_t set(int arg, float single_scale) {
@@ -225,6 +235,15 @@ struct arg_scales_t : public c_compatible {
                     it->second.scales_));
         }
         return status::success;
+    }
+
+    int get_index_val(int arg) const {
+        switch (arg) {
+            case DNNL_ARG_SRC_0: return 0;
+            case DNNL_ARG_SRC_1: return 1;
+            default: assert(!"unsupported arg");
+        }
+        return -1;
     }
 
     std::map<int, scales_t> scales_;
@@ -347,6 +366,12 @@ struct dnnl_post_ops : public dnnl::impl::c_compatible {
 
         struct binary_t {
             dnnl::impl::alg_kind_t alg;
+            // This is an unmodifiable user copy of attributes which is used in
+            // caching mechanism. Not to be used internally.
+            dnnl::impl::memory_desc_t user_src1_desc;
+            // This is a modifiable copy of memory desc. It changes format kind
+            // and tag of md in case user passed format_kind::any. To be used
+            // everywhere internally.
             dnnl::impl::memory_desc_t src1_desc;
         };
 
@@ -355,6 +380,7 @@ struct dnnl_post_ops : public dnnl::impl::c_compatible {
         union {
             struct {
                 float scale;
+                int32_t zero_point;
                 dnnl::impl::data_type_t dt;
             } sum;
             eltwise_t eltwise;
@@ -376,10 +402,12 @@ struct dnnl_post_ops : public dnnl::impl::c_compatible {
                     && IMPLICATION(require_nslope_zero, eltwise.alpha == 0.f);
         }
 
-        bool is_sum(bool require_scale_one = true) const {
+        bool is_sum(bool require_scale_one = true,
+                bool require_zp_zero = true) const {
             using namespace dnnl::impl;
             return kind == primitive_kind::sum
-                    && IMPLICATION(require_scale_one, sum.scale == 1.f);
+                    && IMPLICATION(require_scale_one, sum.scale == 1.f)
+                    && IMPLICATION(require_zp_zero, sum.zero_point == 0);
         }
 
         bool is_convolution() const {
@@ -395,17 +423,20 @@ struct dnnl_post_ops : public dnnl::impl::c_compatible {
 
         bool operator==(const entry_t &rhs) const {
             using namespace dnnl::impl;
+            using namespace dnnl::impl::utils;
             if (kind != rhs.kind) { return false; }
             bool ret = true;
             switch (kind) {
                 case primitive_kind::eltwise:
                     ret = eltwise.alg == rhs.eltwise.alg
-                            && eltwise.scale == rhs.eltwise.scale
-                            && eltwise.alpha == rhs.eltwise.alpha
-                            && eltwise.beta == rhs.eltwise.beta;
+                            && equal_with_nan(eltwise.scale, rhs.eltwise.scale)
+                            && equal_with_nan(eltwise.alpha, rhs.eltwise.alpha)
+                            && equal_with_nan(eltwise.beta, rhs.eltwise.beta);
                     break;
                 case primitive_kind::sum:
-                    ret = sum.scale == rhs.sum.scale && sum.dt == rhs.sum.dt;
+                    ret = equal_with_nan(sum.scale, rhs.sum.scale)
+                            && sum.zero_point == rhs.sum.zero_point
+                            && sum.dt == rhs.sum.dt;
                     break;
                 case primitive_kind::convolution:
                     // Depthwise Only
@@ -419,16 +450,19 @@ struct dnnl_post_ops : public dnnl::impl::c_compatible {
                             && depthwise_conv.count == rhs.depthwise_conv.count
                             && depthwise_conv.mask == rhs.depthwise_conv.mask;
                     if (!ret) break;
-                    for (int i = 0; i < depthwise_conv.count; ++i) {
-                        ret = ret
-                                && depthwise_conv.scales[i]
-                                        == rhs.depthwise_conv.scales[i];
-                        if (!ret) break;
-                    }
+
+                    // only call memcmp with valid pointers
+                    if (depthwise_conv.count == 0) break;
+                    ret = !utils::any_null(depthwise_conv.scales,
+                                  rhs.depthwise_conv.scales)
+                            && !std::memcmp(depthwise_conv.scales,
+                                    rhs.depthwise_conv.scales,
+                                    sizeof(float) * depthwise_conv.count);
                     break;
                 case primitive_kind::binary:
                     ret = binary.alg == rhs.binary.alg
-                            && binary.src1_desc == rhs.binary.src1_desc;
+                            && binary.user_src1_desc
+                                    == rhs.binary.user_src1_desc;
                     break;
                 default: assert(!"unsupported post_op");
             }
@@ -464,8 +498,8 @@ struct dnnl_post_ops : public dnnl::impl::c_compatible {
 
     dnnl_post_ops() : entry_() {}
 
-    dnnl::impl::status_t append_sum(
-            float scale, dnnl::impl::data_type_t dt = dnnl_data_type_undef);
+    dnnl::impl::status_t append_sum(float scale, int32_t zero_point = 0,
+            dnnl::impl::data_type_t dt = dnnl_data_type_undef);
     dnnl::impl::status_t append_eltwise(
             float scale, dnnl::impl::alg_kind_t alg, float alpha, float beta);
     dnnl::impl::status_t append_dw_k3s1p1(dnnl::impl::data_type_t wei_dt,
@@ -475,7 +509,7 @@ struct dnnl_post_ops : public dnnl::impl::c_compatible {
             dnnl::impl::data_type_t bias_dt, dnnl::impl::data_type_t dst_dt,
             dnnl::impl::dim_t count, int mask, const float *scales);
     dnnl::impl::status_t append_binary(dnnl::impl::alg_kind_t alg,
-            const dnnl::impl::memory_desc_t *src1_desc);
+            const dnnl::impl::memory_desc_t *user_src1_desc);
 
     int find(dnnl::impl::primitive_kind_t kind, int start = 0,
             int stop = -1) const {
@@ -489,6 +523,9 @@ struct dnnl_post_ops : public dnnl::impl::c_compatible {
     bool defined() const;
     int len() const { return (int)entry_.size(); }
     bool has_default_values() const { return len() == 0; }
+
+    dnnl::impl::status_t set_default_formats(
+            const dnnl::impl::memory_desc_t *dst_md);
 
     bool sum_with_default_dt(
             dnnl::impl::data_type_t dst_dt = dnnl_data_type_undef) const {
@@ -525,7 +562,6 @@ struct dnnl_post_ops : public dnnl::impl::c_compatible {
 
     std::vector<entry_t> entry_;
 
-private:
     // Since binary post op accepts no more than 32 memory arguments by
     // design, we limit the amount of post-ops to 32.
     static constexpr int post_ops_limit = 32;
@@ -568,14 +604,15 @@ struct dnnl_primitive_attr : public dnnl::impl::c_compatible {
         oscale = 1u << 0,
         oscale_runtime = (unsigned)oscale | (1u << 1),
         scales = 1u << 2,
-        zero_points = 1u << 3,
-        zero_points_runtime = (unsigned)zero_points | (1u << 4),
-        post_ops = 1u << 5,
-        rnn_data_qparams = 1u << 6,
-        rnn_weights_qparams = 1u << 7,
-        rnn_tparams = 1u << 8,
-        sum_dt = 1 << 9,
-        rnn_weights_projection_qparams = 1u << 10
+        scales_runtime = (unsigned)scales | (1u << 3),
+        zero_points = 1u << 4,
+        zero_points_runtime = (unsigned)zero_points | (1u << 5),
+        post_ops = 1u << 6,
+        rnn_data_qparams = 1u << 7,
+        rnn_weights_qparams = 1u << 8,
+        rnn_tparams = 1u << 9,
+        sum_dt = 1 << 10,
+        rnn_weights_projection_qparams = 1u << 11
     };
 
     /** Returns true if the attributes have default values.
@@ -603,6 +640,8 @@ struct dnnl_primitive_attr : public dnnl::impl::c_compatible {
     dnnl::impl::status_t set_scratchpad_mode(
             dnnl::impl::scratchpad_mode_t scratchpad_mode);
     dnnl::impl::status_t set_post_ops(const dnnl::impl::post_ops_t &post_ops);
+    dnnl::impl::status_t set_default_formats(
+            const dnnl::impl::memory_desc_t *dst_md);
 
     // NOTE: make sure that the types below have overloaded comparison operator
     dnnl::impl::scales_t output_scales_;

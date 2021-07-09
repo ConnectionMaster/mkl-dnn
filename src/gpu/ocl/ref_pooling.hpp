@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -33,6 +33,7 @@ namespace gpu {
 namespace ocl {
 
 struct ref_pooling_fwd_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_pooling_fwd_pd_t {
         pd_t(const pooling_v2_desc_t *adesc, const primitive_attr_t *attr,
                 const pooling_fwd_pd_t *hint_fwd_pd)
@@ -60,12 +61,11 @@ struct ref_pooling_fwd_t : public gpu_primitive_t {
                             desc()->prop_kind == forward_inference)
                     && IMPLICATION(src_data_t != dst_data_t,
                             desc()->prop_kind == forward_inference)
-                    && IMPLICATION(utils::one_of(src_data_t, bf16, f16),
-                            src_data_t == dst_data_t)
-                    && IMPLICATION(src_data_t == s8,
-                            utils::one_of(dst_data_t, s8, f32))
-                    && IMPLICATION(src_data_t == u8,
-                            utils::one_of(dst_data_t, u8, f32))
+                    && IMPLICATION(src_data_t == bf16, src_data_t == dst_data_t)
+                    && IMPLICATION(utils::one_of(src_data_t, s8, u8),
+                            utils::one_of(dst_data_t, s8, u8, f16, f32))
+                    && IMPLICATION(src_data_t == f16,
+                            utils::one_of(dst_data_t, s8, u8, f16))
                     && IMPLICATION(src_data_t == f32,
                             utils::one_of(dst_data_t, s8, u8, f32))
                     && IMPLICATION(utils::one_of(f32, src_data_t, dst_data_t),
@@ -74,7 +74,8 @@ struct ref_pooling_fwd_t : public gpu_primitive_t {
                                     && dst_data_t != f32,
                             acc_data_t == s32)
                     && attr()->has_default_values(attr_skip_mask)
-                    && post_ops_with_binary_ok(attr(), dst_md()->data_type, 5);
+                    && post_ops_with_binary_ok(attr(), dst_md()->data_type, 5)
+                    && attr_.set_default_formats(dst_md(0)) == status::success;
             if (!ok) return status::unimplemented;
 
             bool is_training = desc_.prop_kind == forward_training;
@@ -90,8 +91,6 @@ struct ref_pooling_fwd_t : public gpu_primitive_t {
         pool_conf_t conf;
         offsets_t off;
     };
-
-    ref_pooling_fwd_t(const pd_t *apd) : gpu_primitive_t(apd) {}
 
     status_t init(engine_t *engine) override {
         compute::kernel_ctx_t kernel_ctx;
@@ -115,6 +114,7 @@ private:
 };
 
 struct ref_pooling_bwd_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_pooling_bwd_pd_t {
         pd_t(const pooling_v2_desc_t *adesc, const primitive_attr_t *attr,
                 const pooling_fwd_pd_t *hint_fwd_pd)
@@ -154,8 +154,6 @@ struct ref_pooling_bwd_t : public gpu_primitive_t {
         pool_conf_t conf;
         offsets_t off;
     };
-
-    ref_pooling_bwd_t(const pd_t *apd) : gpu_primitive_t(apd) {}
 
     status_t init(engine_t *engine) override {
         compute::kernel_ctx_t kernel_ctx;

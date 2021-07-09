@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2018-2020 Intel Corporation
+* Copyright 2018-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -94,8 +94,8 @@ static unsigned cvt2mask(dnnl_cpu_isa_hints_t hints) {
 }
 
 static bool is_hints_bit_set(cpu_isa_bit_t hint_bit, bool soft) {
-    static const dnnl_cpu_isa_hints_t hints = get_cpu_isa_hints(soft);
-    static const unsigned cur_hints_mask = cpu_isa_hints_utils::cvt2mask(hints);
+    const dnnl_cpu_isa_hints_t hints = get_cpu_isa_hints(soft);
+    const unsigned cur_hints_mask = cpu_isa_hints_utils::cvt2mask(hints);
     return (cur_hints_mask & hint_bit) == hint_bit;
 }
 } // namespace cpu_isa_hints_utils
@@ -146,6 +146,7 @@ enum class cpu_isa_cmp_t {
 
 const char *get_isa_info();
 
+cpu_isa_t get_max_cpu_isa();
 cpu_isa_t DNNL_API get_max_cpu_isa_mask(bool soft = false);
 status_t set_max_cpu_isa(dnnl_cpu_isa_t isa);
 dnnl_cpu_isa_t get_effective_cpu_isa();

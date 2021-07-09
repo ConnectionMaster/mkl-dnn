@@ -127,18 +127,18 @@ update.
 When executed, the inputs and outputs should be mapped to an execution
 argument index as specified by the following table.
 
-| Primitive input/output | Execution argument index                                                  |
-| ---                    | ---                                                                       |
-| \src                   | DNNL_ARG_SRC                                                              |
-| \weights               | DNNL_ARG_WEIGHTS                                                          |
-| \bias                  | DNNL_ARG_BIAS                                                             |
-| \dst                   | DNNL_ARG_DST                                                              |
-| \diffsrc               | DNNL_ARG_DIFF_SRC                                                         |
-| \diffweights           | DNNL_ARG_DIFF_WEIGHTS                                                     |
-| \diffbias              | DNNL_ARG_DIFF_BIAS                                                        |
-| \diffdst               | DNNL_ARG_DIFF_DST                                                         |
-| \f$depthwise\f$        | DNNL_ARG_ATTR_POST_OP_DW                                                  |
-| \f$binary post-op\f$   | DNNL_ARG_ATTR_MULTIPLE_POST_OP(binary_post_op_position) \| DNNL_ARG_SRC_1 |
+| Primitive input/output      | Execution argument index                                                  |
+| ---                         | ---                                                                       |
+| \src                        | DNNL_ARG_SRC                                                              |
+| \weights                    | DNNL_ARG_WEIGHTS                                                          |
+| \bias                       | DNNL_ARG_BIAS                                                             |
+| \dst                        | DNNL_ARG_DST                                                              |
+| \diffsrc                    | DNNL_ARG_DIFF_SRC                                                         |
+| \diffweights                | DNNL_ARG_DIFF_WEIGHTS                                                     |
+| \diffbias                   | DNNL_ARG_DIFF_BIAS                                                        |
+| \diffdst                    | DNNL_ARG_DIFF_DST                                                         |
+| \f$depthwise\f$             | DNNL_ARG_ATTR_POST_OP_DW                                                  |
+| \f$\text{binary post-op}\f$ | DNNL_ARG_ATTR_MULTIPLE_POST_OP(binary_post_op_position) \| DNNL_ARG_SRC_1 |
 
 ## Implementation Details
 
@@ -153,11 +153,12 @@ source, destination, and weights memory objects:
 
 | Propagation        | Source    | Weights   | Destination       | Bias             |
 | :--                | :--       | :--       | :--               | :--              |
-| forward / backward | f32       | f32       | f32               | f32              |
-| forward            | f16       | f16       | f16, f32          | f16, f32         |
+| forward            | f32       | f32       | f32, s8           | f32              |
+| forward            | f16       | f16       | f16, f32, s8      | f16, f32         |
 | forward            | u8, s8    | s8        | u8, s8, s32, f32  | u8, s8, s32, f32 |
 | forward            | bf16      | bf16      | f32, bf16         | f32, bf16        |
 | backward           | f32, bf16 | bf16      | bf16              |                  |
+| backward           | f32       | f32       | f32               | f32              |
 | weights update     | bf16      | f32, bf16 | bf16              | f32, bf16        |
 
 @warning
@@ -270,13 +271,13 @@ Consider the following pseudo-code:
 
 ~~~
     primitive_attr attr;
-    attr.set_output_scale(/* mask */ 0, alpha);
+    attr.set_output_scale(mask=0, alpha);
     attr.set_post_ops({
             { sum={scale=beta} },
-            { eltwise={scale=gamma, type=tanh, alpha=ignore, beta=ignored }
+            { eltwise={scale=gamma, type=tanh, alpha=ignore, beta=ignored } }
         });
 
-    convolution_forward(src, weights, dst, attr)
+    convolution_forward(src, weights, dst, attr);
 ~~~
 
 The would lead to the following:
@@ -295,13 +296,13 @@ The following pseudo-code:
 
 ~~~
     primitive_attr attr;
-    attr.set_output_scale(/* mask */ 0, alpha);
+    attr.set_output_scale(mask=0, alpha);
     attr.set_post_ops({
-            { eltwise={scale=gamma, type=relu, alpha=eta, beta=ignored }
-            { sum={scale=beta} },
+            { eltwise={scale=gamma, type=relu, alpha=eta, beta=ignored } },
+            { sum={scale=beta} }
         });
 
-    convolution_forward(src, weights, dst, attr)
+    convolution_forward(src, weights, dst, attr);
 ~~~
 
 That would lead to the following:
@@ -321,14 +322,14 @@ The following pseudo-code:
 
 ~~~
     primitive_attr attr;
-    attr.set_output_scale(/* mask */ 0, alpha);
-    attr.set_zero_point(src, /* mask */ 0, shift_src);
-    attr.set_zero_point(dst, /* mask */ 0, shift_dst);
+    attr.set_output_scale(mask=0, alpha);
+    attr.set_zero_point(src, mask=0, shift_src);
+    attr.set_zero_point(dst, mask=0, shift_dst);
     attr.set_post_ops({
-            { eltwise={scale=gamma, type=relu, alpha=eta, beta=ignored }
+            { eltwise={scale=gamma, type=relu, alpha=eta, beta=ignored } }
         });
 
-    convolution_forward(src, weights, dst, attr)
+    convolution_forward(src, weights, dst, attr);
 ~~~
 
 That would lead to the following:
@@ -457,6 +458,8 @@ the convolution.)
    - Winograd are implemented only for processors with Intel AVX-512 and
      Intel DL Boost instruction sets
    - Run-time output scales are not supported
+   - Integer \dst is not supported for floating point \src and \weights
+   - backward convolution with bias is not supported
 
 ## Performance Tips
 

@@ -77,25 +77,17 @@ cmake .. \
           <extra build options>
 ~~~
 
-- Compile with Arm Compute Library (AArch64 only)
-
-~~~sh
-export ACL_ROOT_DIR=<path/to/Compute Library>
-cmake .. \
-         -DDNNL_AARCH64_USE_ACL=ON \
-         <extra build options>
-~~~
-Using ACL versions above 20.11 may require the `-DCMAKE_CXX_STANDARD=14`
-and `-DCMAKE_CXX_EXTENSIONS=OFF` flags to be passed.
-
-#### Build and Install the Library
+Open-source version of oneAPI DPC++ Compiler may not contain OpenCL runtime.
+In this case, you can use `OPENCLROOT` CMake option or environment variable
+of the same name to specify path to the OpenCL runtime if it is installed in
+a custom location.
 
 - Build the library
 ~~~sh
 make -j
 ~~~
 
-#### GCC targeting AArch64
+#### GCC targeting AArch64 on x64 host
 
 - Set up the environment for the compiler
 
@@ -107,6 +99,23 @@ cmake .. \
           -DCMAKE_SYSTEM_NAME=Linux \
           -DCMAKE_SYSTEM_PROCESSOR=AARCH64 \
           -DCMAKE_LIBRARY_PATH=/usr/aarch64-linux-gnu/lib \
+          <extra build options>
+~~~
+
+- Build the library
+~~~sh
+make -j
+~~~
+
+#### GCC with Arm Compute Library (ACL) on AArch64 host
+
+- Set up the environment for the compiler
+
+- Configure CMake and generate makefiles
+~~~sh
+export ACL_ROOT_DIR=<path/to/Compute Library>
+cmake .. \
+          -DDNNL_AARCH64_USE_ACL=ON \
           <extra build options>
 ~~~
 
@@ -165,6 +174,12 @@ cmake .. -G Ninja -DDNNL_CPU_RUNTIME=DPCPP ^
                   -DCMAKE_PREFIX_PATH=<path to Level Zero headers> ^
                   <extra build options>
 ~~~
+
+Open-source version of oneAPI DPC++ Compiler may not contain OpenCL runtime.
+In this case, you can use `OPENCLROOT` CMake option or environment variable
+of the same name to specify path to the OpenCL runtime if it is installed in
+a custom location.
+
 @note The only CMake generator that supports oneAPI DPC++ Compiler on Windows
 is Ninja. CC and CXX variables must be set to clang and clang++ respectively. 
 
@@ -193,3 +208,7 @@ Install the library, headers, and documentation
 ~~~sh
 cmake --build . --target install
 ~~~
+The install directory is specified by the [CMAKE_INSTALL_PREFIX](https://cmake.org/cmake/help/latest/variable/CMAKE_INSTALL_PREFIX.html)
+cmake variable. When installing in the default directory, the above command
+needs to be run with administrative privileges using `sudo` on Linux/Mac or a
+command prompt run as administrator on Windows. 

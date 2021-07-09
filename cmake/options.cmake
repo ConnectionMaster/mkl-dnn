@@ -40,6 +40,9 @@ option(DNNL_ENABLE_CONCURRENT_EXEC
 option(DNNL_ENABLE_PRIMITIVE_CACHE "enables primitive cache." ON)
     # enabled by default
 
+option(DNNL_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE "If DNNL_ENABLE_PRIMITIVE_CACHE
+    is ON enables using runtime objects in the primitive cache" OFF)
+
 option(DNNL_ENABLE_MAX_CPU_ISA
     "enables control of CPU ISA detected by oneDNN via DNNL_MAX_CPU_ISA
     environment variable and dnnl_set_max_cpu_isa() function" ON)
@@ -63,10 +66,12 @@ option(DNNL_BUILD_FOR_CI
 option(DNNL_WERROR "treat warnings as errors" OFF)
 
 set(DNNL_TEST_SET "CI" CACHE STRING
-    "specifies testing targets coverage. Supports CI, NIGHTLY.
+    "specifies testing targets coverage. Supports CI, CI_NO_CORR, NIGHTLY.
 
     When CI option is set, it enables a subset of test targets to run. When
-    NIGHTLY option is set, it enables a broader set of test targets to run.")
+    CI_NO_CORR option is set, it enables same coverage as for CI option, but
+    switches off correctness validation for benchdnn targets. When NIGHTLY
+    option is set, it enables a broader set of test targets to run.")
 
 set(DNNL_INSTALL_MODE "DEFAULT" CACHE STRING
     "specifies installation mode; supports DEFAULT or BUNDLE.
@@ -80,6 +85,9 @@ set(DNNL_CODE_COVERAGE "OFF" CACHE STRING
 if(NOT "${DNNL_CODE_COVERAGE}" MATCHES "^(OFF|GCOV)$")
     message(FATAL_ERROR "Unsupported code coverage tool: ${DNNL_CODE_COVERAGE}")
 endif()
+
+set(DNNL_DPCPP_HOST_COMPILER "DEFAULT" CACHE STRING
+    "specifies host compiler for Intel oneAPI DPC++ Compiler")
 
 # =============
 # Optimizations
@@ -135,7 +143,7 @@ set(DNNL_CPU_RUNTIME "OMP" CACHE STRING
     To use Threading Building Blocks (TBB) one should also
     set TBBROOT (either environment variable or CMake option) to the library
     location.")
-if(NOT "${DNNL_CPU_RUNTIME}" MATCHES "^(OMP|TBB|SEQ|THREADPOOL|DPCPP|SYCL)$")
+if(NOT "${DNNL_CPU_RUNTIME}" MATCHES "^(NONE|OMP|TBB|SEQ|THREADPOOL|DPCPP|SYCL)$")
     message(FATAL_ERROR "Unsupported CPU runtime: ${DNNL_CPU_RUNTIME}")
 endif()
 
@@ -214,8 +222,10 @@ option(BENCHDNN_USE_RDPMC
 set(DNNL_USE_CLANG_SANITIZER "" CACHE STRING
     "instructs build system to use a Clang sanitizer. Possible values:
     Address: enables AddressSanitizer
+    Leak: enables LeakSanitizer
     Memory: enables MemorySanitizer
     MemoryWithOrigin: enables MemorySanitizer with origin tracking
+    Thread: enables ThreadSanitizer
     Undefined: enables UndefinedBehaviourSanitizer
     This feature is experimental and is only available on Linux.")
 

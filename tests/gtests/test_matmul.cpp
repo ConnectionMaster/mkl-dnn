@@ -105,6 +105,9 @@ protected:
                         && ((p.attr.zero_points.src & P::PER_N)
                                 || (p.attr.zero_points.dst & P::PER_N)),
                 "Per dimensional zero points are not supported on GPU");
+        SKIP_IF(get_test_engine_kind() == engine::kind::cpu
+                        && p.base.src.tag == impl::format_tag::AB8a4b,
+                "Don't test blocked formats on CPU");
 
         SKIP_IF_CUDA((p.attr.zero_points.src != 0 || p.attr.zero_points.dst != 0
                              || p.attr.zero_points.weights != 0),
@@ -169,6 +172,7 @@ protected:
                 scales_m = test::make_memory(
                         {{scale_size}, memory::data_type::f32, {1}}, eng);
                 auto s = map_memory<float>(scales_m);
+                GTEST_EXPECT_NE(s, nullptr);
                 for (memory::dim i = 0; i < scale_size; ++i)
                     s[i] = 2.f;
             } else {
@@ -211,6 +215,7 @@ protected:
                 zero_points_m = test::make_memory(
                         {{zero_points_size}, memory::data_type::s32, {1}}, eng);
                 auto z = map_memory<int32_t>(zero_points_m);
+                GTEST_EXPECT_NE(z, nullptr);
                 for (memory::dim i = 0; i < zero_points_size; ++i)
                     z[i] = (arg % 7) - 3;
             } else {
@@ -300,6 +305,7 @@ protected:
         auto set_to_zero = [](memory &m) {
             if (m) {
                 auto p = map_memory<char>(m);
+                GTEST_EXPECT_NE(p, nullptr);
                 memset(p, 0, m.get_desc().get_size());
             }
         };
@@ -325,6 +331,64 @@ protected:
         strm.wait();
     }
 };
+
+struct attr_test_t
+    : public ::testing::TestWithParam<std::tuple<memory::dims, memory::dims,
+              memory::format_tag, memory::data_type, int>> {};
+
+HANDLE_EXCEPTIONS_FOR_TEST_P(
+        attr_test_t, TestMatmulShouldCallSameImplementationWithAttributes) {
+    auto engine_kind = get_test_engine_kind();
+    SKIP_IF(!DNNL_X64 || engine_kind != engine::kind::cpu,
+            "Binary impl_info_str should be same only on x64 CPU");
+    engine e {engine_kind, 0};
+
+    const auto &tensor_dims = std::get<0>(GetParam());
+    const auto format_tag = std::get<2>(GetParam());
+
+    auto src_md = memory::desc(tensor_dims, memory::data_type::u8, format_tag);
+    auto weights_md
+            = memory::desc(tensor_dims, memory::data_type::s8, format_tag);
+    auto dst_md = memory::desc(tensor_dims, memory::data_type::s8, format_tag);
+    auto bia_md = memory::desc();
+
+    auto matmul_d = matmul::desc(src_md, weights_md, bia_md, dst_md);
+
+    std::string impl_info_no_postops;
+    auto matmul_pd = matmul::primitive_desc(matmul_d, e);
+    ASSERT_NO_THROW(impl_info_no_postops = matmul_pd.impl_info_str(););
+
+    dnnl::primitive_attr attr;
+    const float scale = 1.f;
+    const float alpha = 1.f;
+    const float beta = 1.f;
+    const float oscale = 1.5f;
+
+    const int ndims = std::get<4>(GetParam());
+    // per-channel output scales
+    std::vector<float> oscales(tensor_dims[1], oscale);
+    attr.set_output_scales(1 << (ndims - 1), oscales);
+
+    dnnl::post_ops ops;
+    ops.append_sum(1.0);
+    ops.append_eltwise(scale, algorithm::eltwise_relu, alpha, beta);
+
+    const auto &binary_po_tensor_dims = std::get<1>(GetParam());
+    const auto &binary_po_mem_dt = std::get<3>(GetParam());
+    SKIP_IF(unsupported_data_type(binary_po_mem_dt),
+            "Engine does not support this data type.");
+    memory::desc src1_po_md(
+            binary_po_tensor_dims, binary_po_mem_dt, format_tag);
+    ops.append_binary(algorithm::binary_add, src1_po_md);
+
+    attr.set_post_ops(ops);
+
+    std::string impl_info_with_postops;
+
+    matmul_pd = matmul::primitive_desc(matmul_d, attr, e);
+    ASSERT_NO_THROW(impl_info_with_postops = matmul_pd.impl_info_str(););
+    ASSERT_EQ(impl_info_no_postops, impl_info_with_postops);
+}
 
 /********************************* TEST CASES *********************************/
 
@@ -384,16 +448,24 @@ static auto cases_ef = []() {
             dnnl_unimplemented});
 
     // unimplemented data types
-    cases.push_back(
-            {{{{10, 1}, data_type::f32, tag::ab},
-                     {{1, 20}, data_type::f32, tag::ab},
-                     {{10, 20}, data_type::f32, tag::ab}, data_type::u8},
-                    {}, true, dnnl_unimplemented});
+    if (get_test_engine_kind() == engine::kind::cpu) {
+        cases.push_back(
+                {{{{10, 1}, data_type::f32, tag::ab},
+                         {{1, 20}, data_type::f32, tag::ab},
+                         {{10, 20}, data_type::f32, tag::ab}, data_type::u8},
+                        {}, true, dnnl_unimplemented});
+    }
     // XXX: disable assert in type_helpers.hpp: default_accum_data_type(...)
     // cases.push_back({{{{10, 1}, data_type::u8, tag::ab}, {{1, 20},
     // data_type::u8, tag::ab},
     //                           {{10, 20}, data_type::u8, tag::ab}},
     //        {}, true, dnnl_unimplemented});
+
+    // unimplemented formats (GPU only)
+    cases.push_back({{{{16, 16}, data_type::f32, tag::AB8a4b},
+                             {{16, 16}, data_type::f32, tag::AB8a4b},
+                             {{16, 16}, data_type::f32, tag::AB8a4b}},
+            {}, true, dnnl_unimplemented});
 
     return ::testing::ValuesIn(cases);
 };
@@ -562,5 +634,22 @@ INSTANTIATE_TEST_SUITE_P(
         Generic_s8s8s32, iface, cases_x8(data_type::s8, data_type::s32));
 INSTANTIATE_TEST_SUITE_P(
         Generic_u8s8u8, iface, cases_x8(data_type::u8, data_type::u8));
+
+INSTANTIATE_TEST_SUITE_P(TensorDims, attr_test_t,
+        ::testing::Values(
+                // {{src0, src1, dst same_dim}, { binary post-op dim }},
+                // format_tag, post-op data type, ndims
+                std::make_tuple(memory::dims {3, 2, 16, 16},
+                        memory::dims {3, 1, 16, 16}, tag::abcd,
+                        memory::data_type::f32, 4),
+                std::make_tuple(memory::dims {9, 9, 64, 64},
+                        memory::dims {9, 1, 64, 64}, tag::abcd,
+                        memory::data_type::f32, 4),
+                std::make_tuple(memory::dims {3, 2, 16, 16},
+                        memory::dims {3, 2, 16, 16}, tag::abcd,
+                        memory::data_type::f32, 4),
+                std::make_tuple(memory::dims {2, 10, 10, 10},
+                        memory::dims {2, 10, 10, 10}, tag::abcd,
+                        memory::data_type::bf16, 4)));
 
 } // namespace dnnl

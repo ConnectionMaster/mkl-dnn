@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -92,7 +92,8 @@ static status_t init_conf_common(conv_conf_t &conf, offsets_t &off,
 }
 
 static status_t init_kernel_ctx_common(compute::kernel_ctx_t &kernel_ctx,
-        const conv_conf_t &conf, const offsets_t &off) {
+        const conv_conf_t &conf, const offsets_t &off,
+        const post_ops_t &post_ops) {
     kernel_ctx.define_int("NDIMS", conf.ndims);
     kernel_ctx.define_int("G", conf.ngroups);
     kernel_ctx.define_int("WITH_GROUPS", conf.with_groups);
@@ -133,7 +134,6 @@ static status_t init_kernel_ctx_common(compute::kernel_ctx_t &kernel_ctx,
 
     def_offsets(off.src_off, kernel_ctx, "SRC", conf.ndims);
     def_offsets(off.wei_off, kernel_ctx, "WEI", conf.ndims + conf.with_groups);
-    def_offsets(off.bias_off, kernel_ctx, "BIA", 1);
     def_offsets(off.dst_off, kernel_ctx, "DST", conf.ndims);
 
     def_dispatch(kernel_ctx, conf.dispatch);
@@ -163,7 +163,7 @@ static status_t init_kernel_ctx_common(compute::kernel_ctx_t &kernel_ctx,
                     : conf.attr_info.sum_data_type,
             "SUM");
 
-    def_attr_info(kernel_ctx, conf.attr_info);
+    def_attr_info(kernel_ctx, conf.attr_info, post_ops);
     return status::success;
 }
 
@@ -175,16 +175,18 @@ status_t ref_convolution_fwd_t::pd_t::init_conf(engine_t *engine) {
 
 status_t ref_convolution_fwd_t::pd_t::init_kernel_ctx(
         compute::kernel_ctx_t &kernel_ctx) const {
-    return init_kernel_ctx_common(kernel_ctx, conf, off);
+    return init_kernel_ctx_common(kernel_ctx, conf, off, attr()->post_ops_);
 }
 
 status_t ref_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
 
+    status_t status = status::success;
     auto &src = CTX_IN_STORAGE(DNNL_ARG_SRC);
     auto &weights = CTX_IN_STORAGE(DNNL_ARG_WEIGHTS);
     auto &bias = CTX_IN_STORAGE(DNNL_ARG_BIAS);
     auto &oscales = CTX_IN_STORAGE(DNNL_ARG_ATTR_OUTPUT_SCALES);
-    auto &dst = CTX_OUT_STORAGE(DNNL_ARG_DST);
+    auto &dst = CTX_OUT_CLEAN_STORAGE(DNNL_ARG_DST, status);
+    CHECK(status);
     auto &src_zpoints
             = CTX_IN_STORAGE(DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC);
     auto &dst_zpoints
@@ -200,7 +202,7 @@ status_t ref_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
     arg_list.set(3, dst);
 
     unsigned arg_idx = append_post_ops_to_arg_list(
-            ctx, arg_list, 4, conf.attr_info.all_post_ops);
+            ctx, arg_list, 4, pd()->attr()->post_ops_);
 
     arg_list.set(arg_idx, common_oscales);
     if (conf.attr_info.with_per_oc_oscales) {
@@ -224,7 +226,7 @@ status_t ref_convolution_fwd_t::execute_forward(const exec_ctx_t &ctx) const {
 
     auto nd_range = pd()->conf.dispatch.nd_range();
 
-    status_t status = parallel_for(ctx, nd_range, kernel_, arg_list);
+    status = parallel_for(ctx, nd_range, kernel_, arg_list);
     return status;
 }
 
@@ -234,15 +236,17 @@ status_t ref_convolution_bwd_data_t::pd_t::init_conf(engine_t *engine) {
 
 status_t ref_convolution_bwd_data_t::pd_t::init_kernel_ctx(
         compute::kernel_ctx_t &kernel_ctx) const {
-    return init_kernel_ctx_common(kernel_ctx, conf, off);
+    return init_kernel_ctx_common(kernel_ctx, conf, off, attr()->post_ops_);
 }
 
 status_t ref_convolution_bwd_data_t::execute_backward_data(
         const exec_ctx_t &ctx) const {
 
+    status_t status = status::success;
     auto &diff_dst = CTX_IN_STORAGE(DNNL_ARG_DIFF_DST);
     auto &weights = CTX_IN_STORAGE(DNNL_ARG_WEIGHTS);
-    auto &diff_src = CTX_OUT_STORAGE(DNNL_ARG_DIFF_SRC);
+    auto &diff_src = CTX_OUT_CLEAN_STORAGE(DNNL_ARG_DIFF_SRC, status);
+    CHECK(status);
     auto &bias = CTX_IN_STORAGE(DNNL_ARG_BIAS);
 
     compute::kernel_arg_list_t arg_list;
@@ -251,12 +255,11 @@ status_t ref_convolution_bwd_data_t::execute_backward_data(
     arg_list.set(2, diff_dst);
     arg_list.set(3, bias);
 
-    append_post_ops_to_arg_list(
-            ctx, arg_list, 4, pd()->conf.attr_info.all_post_ops);
+    append_post_ops_to_arg_list(ctx, arg_list, 4, pd()->attr()->post_ops_);
 
     auto nd_range = pd()->conf.dispatch.nd_range();
 
-    status_t status = parallel_for(ctx, nd_range, kernel_, arg_list);
+    status = parallel_for(ctx, nd_range, kernel_, arg_list);
 
     return status;
 }
@@ -267,16 +270,19 @@ status_t ref_convolution_bwd_weights_t::pd_t::init_conf(engine_t *engine) {
 
 status_t ref_convolution_bwd_weights_t::pd_t::init_kernel_ctx(
         compute::kernel_ctx_t &kernel_ctx) const {
-    return init_kernel_ctx_common(kernel_ctx, conf, off);
+    return init_kernel_ctx_common(kernel_ctx, conf, off, attr()->post_ops_);
 }
 
 status_t ref_convolution_bwd_weights_t::execute_backward_weights(
         const exec_ctx_t &ctx) const {
 
+    status_t status = status::success;
     auto &src = CTX_IN_STORAGE(DNNL_ARG_SRC);
     auto &diff_dst = CTX_IN_STORAGE(DNNL_ARG_DIFF_DST);
-    auto &diff_weights = CTX_OUT_STORAGE(DNNL_ARG_DIFF_WEIGHTS);
-    auto &diff_bias = CTX_OUT_STORAGE(DNNL_ARG_DIFF_BIAS);
+    auto &diff_weights = CTX_OUT_CLEAN_STORAGE(DNNL_ARG_DIFF_WEIGHTS, status);
+    CHECK(status);
+    auto &diff_bias = CTX_OUT_CLEAN_STORAGE(DNNL_ARG_DIFF_BIAS, status);
+    CHECK(status);
 
     compute::kernel_arg_list_t arg_list;
     arg_list.set(0, src);
@@ -286,7 +292,7 @@ status_t ref_convolution_bwd_weights_t::execute_backward_weights(
 
     auto nd_range = pd()->conf.dispatch.nd_range();
 
-    status_t status = parallel_for(ctx, nd_range, kernel_, arg_list);
+    status = parallel_for(ctx, nd_range, kernel_, arg_list);
 
     return status;
 }

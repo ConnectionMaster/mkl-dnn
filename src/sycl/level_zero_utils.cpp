@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -14,6 +14,7 @@
 * limitations under the License.
 *******************************************************************************/
 
+#include "sycl/level_zero_utils.hpp"
 #include "oneapi/dnnl/dnnl_config.h"
 
 #if defined(DNNL_WITH_LEVEL_ZERO)
@@ -46,25 +47,9 @@
 
 #include "sycl/sycl_gpu_engine.hpp"
 
-#include "sycl/level_zero_utils.hpp"
-
 namespace dnnl {
 namespace impl {
 namespace sycl {
-
-#if defined(LEVEL_ZERO_NOT_SUPPORTED)
-
-device_uuid_t get_device_uuid(const cl::sycl::device &) {
-    return device_uuid_t(0, 0);
-}
-
-status_t sycl_create_program_with_level_zero(
-        std::unique_ptr<cl::sycl::kernel> &, const sycl_gpu_engine_t *,
-        const gpu::compute::binary_t *) {
-    return status::unimplemented;
-}
-
-#else
 
 namespace {
 
@@ -95,9 +80,9 @@ void *find_ze_symbol(const char *symbol) {
     }
 
 #if defined(__linux__)
-    void *f = dlsym(handle, symbol);
+    void *f = reinterpret_cast<void *>(dlsym(handle, symbol));
 #elif defined(_WIN32)
-    void *f = GetProcAddress(handle, symbol);
+    void *f = reinterpret_cast<void *>(GetProcAddress(handle, symbol));
 #endif
     if (!f) {
         if (get_verbose())
@@ -120,15 +105,6 @@ status_t func_zeModuleCreate(ze_context_handle_t hContext,
 
     if (!f) return status::runtime_error;
     ZE_CHECK(f(hContext, hDevice, desc, phModule, phBuildLog));
-    return status::success;
-}
-
-status_t func_zeModuleDestroy(ze_module_handle_t hModule) {
-    static auto f
-            = find_ze_symbol<decltype(&zeModuleDestroy)>("zeModuleDestroy");
-
-    if (!f) return status::runtime_error;
-    ZE_CHECK(f(hModule));
     return status::success;
 }
 
@@ -155,6 +131,7 @@ device_uuid_t get_device_uuid(const cl::sycl::device &dev) {
     ze_device_properties_t ze_device_properties;
     auto ze_device = dev.get_native<cl::sycl::backend::level_zero>();
     auto status = func_zeDeviceGetProperties(ze_device, &ze_device_properties);
+    MAYBE_UNUSED(status);
     assert(status == status::success);
 
     const auto &ze_device_id = ze_device_properties.uuid.id;
@@ -193,7 +170,36 @@ status_t sycl_create_program_with_level_zero(
     return status::success;
 }
 
-#endif // defined(LEVEL_ZERO_NOT_SUPPORTED)
+bool compare_ze_devices(
+        const cl::sycl::device &lhs, const cl::sycl::device &rhs) {
+    auto lhs_ze_handle = lhs.get_native<cl::sycl::backend::level_zero>();
+    auto rhs_ze_handle = rhs.get_native<cl::sycl::backend::level_zero>();
+    return lhs_ze_handle == rhs_ze_handle;
+}
+
+} // namespace sycl
+} // namespace impl
+} // namespace dnnl
+
+#else
+
+namespace dnnl {
+namespace impl {
+namespace sycl {
+
+device_uuid_t get_device_uuid(const cl::sycl::device &) {
+    return device_uuid_t(0, 0);
+}
+
+status_t sycl_create_program_with_level_zero(
+        std::unique_ptr<cl::sycl::kernel> &, const sycl_gpu_engine_t *,
+        const gpu::compute::binary_t *) {
+    return status::unimplemented;
+}
+
+bool compare_ze_devices(const cl::sycl::device &, const cl::sycl::device &) {
+    return false;
+}
 
 } // namespace sycl
 } // namespace impl

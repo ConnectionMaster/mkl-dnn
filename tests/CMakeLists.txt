@@ -1,5 +1,5 @@
 #===============================================================================
-# Copyright 2016-2020 Intel Corporation
+# Copyright 2016-2021 Intel Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -37,10 +37,10 @@ append(CMAKE_CXX_FLAGS "${CMAKE_CCXX_SANITIZER_FLAGS}")
 
 # allow tests to include internal header files with, e.g.
 # include "src/common/dnnl_thread.hpp" ...
-include_directories(${PROJECT_SOURCE_DIR})
+include_directories_with_host_compiler(${PROJECT_SOURCE_DIR})
 # ... and allow the included files transitively include other headers files
 # e.g. include "common/dnnl_thread_parallel_nd.hpp" from "dnnl_thread.hpp"
-include_directories(${PROJECT_SOURCE_DIR}/src)
+include_directories_with_host_compiler(${PROJECT_SOURCE_DIR}/src)
 
 if(WIN32 AND NOT MINGW)
     if("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Intel")
@@ -60,7 +60,11 @@ endif()
 append(CMAKE_C_FLAGS "${CMAKE_TEST_CCXX_NOWARN_FLAGS}")
 append(CMAKE_CXX_FLAGS "${CMAKE_TEST_CCXX_NOWARN_FLAGS}")
 
-register_exe(api-c api.c "test")
+append_host_compiler_options(CMAKE_CXX_FLAGS "${DPCPP_CXX_NOWARN_FLAGS}")
+
+if(NOT DNNL_CPU_RUNTIME STREQUAL "NONE")
+    register_exe(api-c api.c "test")
+endif()
 
 if(NOT "${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang" AND (UNIX OR MINGW))
     get_directory_property(include_dirs INCLUDE_DIRECTORIES)
@@ -75,16 +79,26 @@ if(NOT "${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang" AND (UNIX OR MINGW))
 # No Windows support for: test_c_symbols.c
 endif()
 
-add_definitions(-DNOMINMAX) # to allow std::max on Windows with parentheses
+add_definitions_with_host_compiler(-DNOMINMAX) # to allow std::max on Windows with parentheses
 
 if(NOT DNNL_ENABLE_PRIMITIVE_CACHE)
-    add_definitions(-DDNNL_DISABLE_PRIMITIVE_CACHE)
+    add_definitions_with_host_compiler(-DDNNL_DISABLE_PRIMITIVE_CACHE)
 endif()
 
 if ("${DNNL_CPU_THREADING_RUNTIME}" STREQUAL "THREADPOOL")
     # Only enable this for threadpool runtime to avoid complaints about empty
     # object files.
     set(TEST_THREAD ${CMAKE_CURRENT_SOURCE_DIR}/test_thread.cpp)
+endif()
+
+# Switch on threading layer for GPU only configurations to speed up testing.
+# For non-dppcp compilers OpenMP threading will be used which is handled in
+# OpenMP.cmake.
+if(DNNL_WITH_SYCL AND DNNL_CPU_RUNTIME STREQUAL "NONE")
+    list(INSERT CMAKE_MODULE_PATH 0 ${PROJECT_SOURCE_DIR}/cmake)
+    find_package_tbb(REQUIRED)
+    list(REMOVE_AT CMAKE_MODULE_PATH 0)
+    handle_tbb_target()
 endif()
 
 add_subdirectory(gtests)

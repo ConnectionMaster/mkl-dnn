@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -29,7 +29,6 @@
 #include "gpu/ocl/gemm/gen9_gemm_kernel.hpp"
 #include "gpu/ocl/ocl_stream.hpp"
 #include "gpu/ocl/ocl_utils.hpp"
-
 namespace dnnl {
 namespace impl {
 namespace gpu {
@@ -49,6 +48,7 @@ union plan_element_t {
 };
 
 struct gen9_gemm_t : public gpu_gemm_t {
+    using gpu_gemm_t::gpu_gemm_t;
 
     enum class type {
         copy_based,
@@ -79,13 +79,16 @@ struct gen9_gemm_t : public gpu_gemm_t {
             if (!ok) return status::unimplemented;
 
             const auto d = desc();
-
             // LIMITATIONS:
             // - runtime dims are not supported
             // - bias is not supported
-            bool limits_ok
-                    = !utils::one_of(DNNL_RUNTIME_DIM_VAL, d->batch(), d->m(),
-                              d->n(), d->k(), d->lda(), d->ldb(), d->ldc())
+            // - only 2D and 3D tensors supported
+            // - broadcast on batch dimension not supported
+            bool limits_ok = !has_blocks() && d->c_desc.ndims <= 3
+                    && IMPLICATION(d->is_batched(),
+                            d->a_desc.dims[0] == d->b_desc.dims[0])
+                    && !utils::one_of(DNNL_RUNTIME_DIM_VAL, d->batch(), d->m(),
+                            d->n(), d->k(), d->lda(), d->ldb(), d->ldc())
                     && d->bias_type() == data_type::undef;
 
             ok = limits_ok
@@ -114,7 +117,8 @@ struct gen9_gemm_t : public gpu_gemm_t {
                                     || attr()->post_ops_.find(sum) != -1)
                     && IMPLICATION(attr()->post_ops_.len() == 2,
                             attr()->post_ops_.find(sum) == 0
-                                    && attr()->post_ops_.find(eltwise) == 1);
+                                    && attr()->post_ops_.find(eltwise) == 1)
+                    && attr_.set_default_formats(dst_md(0)) == status::success;
             if (!ok) return status::unimplemented;
 
             // The threshold values for m, n and k were obtained by collecting
@@ -378,8 +382,6 @@ struct gen9_gemm_t : public gpu_gemm_t {
 #endif
     };
 
-    gen9_gemm_t(const pd_t *apd) : gpu_gemm_t(apd) {}
-
     status_t init(engine_t *engine) override {
         switch (pd()->gemm_type_) {
             case type::copy_based: return init_copy_based(engine);
@@ -402,9 +404,10 @@ struct gen9_gemm_t : public gpu_gemm_t {
             if (beta0 && pd()->beta() != 0) continue;
 
             compute::kernel_ctx_t kernel_ctx;
-            auto status = gen9_gemm_compute_kernel_t::init_kernel_ctx(
-                    kernel_ctx, beta0, pd()->attr_info_, pd()->desc()->acc_type,
-                    pd()->desc()->c_type());
+            auto status
+                    = gen9_gemm_compute_kernel_t::init_kernel_ctx(kernel_ctx,
+                            beta0, pd()->attr_info_, pd()->attr()->post_ops_,
+                            pd()->desc()->acc_type, pd()->desc()->c_type());
             if (status != status::success) return status;
 
             create_kernel(engine, &compute_kernel_[beta0], "gen9_gemm_compute",
@@ -463,7 +466,8 @@ struct gen9_gemm_t : public gpu_gemm_t {
 
         auto status = gen9_gemm_nocopy_kernel_t::init_kernel_ctx(kernel_ctx,
                 pd()->desc()->transa(), pd()->desc()->transb(), with_k_unroll,
-                unroll_k, pd()->attr_info_, pd()->desc()->c_type());
+                unroll_k, pd()->attr_info_, pd()->attr()->post_ops_,
+                pd()->desc()->c_type());
         if (status != status::success) return status;
 
         create_kernel(engine, &nocopy_kernel_, kernel_name, kernel_ctx);
@@ -480,7 +484,8 @@ struct gen9_gemm_t : public gpu_gemm_t {
 
         auto status = gen9_gemm_nocopy_superkernel_t::init_kernel_ctx(
                 kernel_ctx, pd()->desc()->transa(), pd()->desc()->transb(),
-                pd()->attr_info_, pd()->desc()->c_type());
+                pd()->attr_info_, pd()->attr()->post_ops_,
+                pd()->desc()->c_type());
         if (status != status::success) return status;
 
         create_kernel(engine, &nocopy_superkernel_,

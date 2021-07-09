@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -26,18 +26,25 @@
 using namespace dnnl::impl::cpu::x64;
 #endif
 
+#if DNNL_AARCH64 && DNNL_AARCH64_USE_ACL
+#include "cpu/aarch64/acl_inner_product.hpp"
+using namespace dnnl::impl::cpu::aarch64;
+#endif
+
 namespace dnnl {
 namespace impl {
 namespace cpu {
-
-using pd_create_f = engine_t::primitive_desc_create_f;
 
 namespace {
 using namespace dnnl::impl::data_type;
 
 // clang-format off
-const pd_create_f impl_list[] = {
+const impl_list_item_t impl_list[] = {
         /* f32 */
+        CPU_INSTANCE_X64(brgemm_inner_product_fwd_t<avx512_core>)
+        CPU_INSTANCE_X64(brgemm_inner_product_bwd_data_t<avx512_core>)
+        CPU_INSTANCE_X64(brgemm_inner_product_bwd_weights_t<avx512_core>)
+        CPU_INSTANCE_AARCH64_ACL(acl_inner_product_fwd_t)
         CPU_INSTANCE(gemm_inner_product_fwd_t<f32>)
         CPU_INSTANCE(gemm_inner_product_bwd_data_t<f32>)
         CPU_INSTANCE(gemm_inner_product_bwd_weights_t<f32>)
@@ -45,11 +52,12 @@ const pd_create_f impl_list[] = {
         CPU_INSTANCE(ref_inner_product_bwd_data_t<f32, f32, f32, f32>)
         CPU_INSTANCE(ref_inner_product_bwd_weights_t<f32>)
         /* bfloat16 */
+        CPU_INSTANCE_X64(brgemm_inner_product_fwd_t<avx512_core_bf16_amx_bf16>)
         CPU_INSTANCE_X64(brgemm_inner_product_fwd_t<avx512_core_bf16>)
-        CPU_INSTANCE_X64(brgemm_inner_product_bwd_data_t<avx512_core_bf16, f32, bf16, bf16>)
-        CPU_INSTANCE_X64(brgemm_inner_product_bwd_data_t<avx512_core_bf16, bf16>)
-        CPU_INSTANCE_X64(brgemm_inner_product_bwd_weights_t<avx512_core_bf16, bf16, f32, bf16>)
-        CPU_INSTANCE_X64(brgemm_inner_product_bwd_weights_t<avx512_core_bf16, bf16>)
+        CPU_INSTANCE_X64(brgemm_inner_product_bwd_data_t<avx512_core_bf16_amx_bf16>)
+        CPU_INSTANCE_X64(brgemm_inner_product_bwd_data_t<avx512_core_bf16>)
+        CPU_INSTANCE_X64(brgemm_inner_product_bwd_weights_t<avx512_core_bf16_amx_bf16>)
+        CPU_INSTANCE_X64(brgemm_inner_product_bwd_weights_t<avx512_core_bf16>)
         CPU_INSTANCE_X64(gemm_bf16_inner_product_fwd_t<f32>)
         CPU_INSTANCE_X64(gemm_bf16_inner_product_fwd_t<bf16>)
         CPU_INSTANCE_X64(gemm_bf16_inner_product_bwd_data_t<f32>)
@@ -83,7 +91,7 @@ const pd_create_f impl_list[] = {
 // clang-format on
 } // namespace
 
-const pd_create_f *get_inner_product_impl_list(
+const impl_list_item_t *get_inner_product_impl_list(
         const inner_product_desc_t *desc) {
     UNUSED(desc);
     return impl_list;

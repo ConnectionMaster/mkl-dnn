@@ -1,5 +1,5 @@
 #===============================================================================
-# Copyright 2019-2020 Intel Corporation
+# Copyright 2019-2021 Intel Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,65 +14,45 @@
 # limitations under the License.
 #===============================================================================
 
-# Generates cpp file with GPU kernel code stored as string
+# Generates cpp file with GPU kernel or header code stored as string
 # Parameters:
-#   KER_FILE    -- path to the kernel source file
-#   KER_INC_DIR -- include directory
+#   CL_FILE    -- path to the kernel source or header file
 #   GEN_FILE   -- path to the generated cpp file
 #===============================================================================
 
-# Read lines of kernel file and recursively substitute 'include'
-# preprocessor directives.
-#   ker_file  -- path to the kernel file
-#   ker_lines -- list with code lines
-function(read_lines ker_file ker_lines)
-    file(STRINGS ${ker_file} contents NEWLINE_CONSUME)
-    # Replace square brackets as they have special meaning in CMake
-    string(REGEX REPLACE "\\[" "__BRACKET0__" contents "${contents}")
-    string(REGEX REPLACE "\\]" "__BRACKET1__" contents "${contents}")
-    # Escape backslash
-    string(REGEX REPLACE "\\\\([^\n;])" "\\\\\\\\\\1" contents "${contents}")
-    # Escape backslash (space is to avoid '\;' sequences after the split to a list)
-    string(REGEX REPLACE "\\\\\n" "\\\\\\\\ \n" contents "${contents}")
-    # Use EOL to split the contents to a list
-    string(REGEX REPLACE "\n" ";" contents "${contents}")
+file(READ ${CL_FILE} cl_file_lines)
 
-    set(pp_lines)
-    foreach(l ${contents})
-        if(l MATCHES "^\\s*#include \"(.*)\"")
-            set(inc_file "${KER_INC_DIR}/${CMAKE_MATCH_1}")
-            set(inc_lines)
-            read_lines(${inc_file} inc_lines)
-            list(APPEND pp_lines "${inc_lines}")
-        else()
-            string(REGEX REPLACE ";" "\\\\;" esc_line "${l}")
-            list(APPEND pp_lines "${esc_line}")
-        endif()
-    endforeach()
-    set(${ker_lines} "${pp_lines}" PARENT_SCOPE)
-endfunction()
+# Remove C++ style comments
+string(REGEX REPLACE "//[^\n]*\n" "\n" cl_file_lines "${cl_file_lines}")
+# Remove repeated whitespaces
+string(REGEX REPLACE " +" " " cl_file_lines "${cl_file_lines}")
+# Remove leading whitespaces
+string(REGEX REPLACE "\n " "\n" cl_file_lines "${cl_file_lines}")
+# Remove empty lines
+string(REGEX REPLACE "\n+" "\n" cl_file_lines "${cl_file_lines}")
 
-read_lines(${KER_FILE} ker_lines)
+string(LENGTH "${cl_file_lines}" len)
+if(len GREATER 65535)
+    message(WARNING "Windows requires string literals to fit in 65535 bytes. Please split ${CL_FILE}.")
+endif()
 
-# Replace unescaped semicolon by EOL
-string(REGEX REPLACE "([^\\]|^);" "\\1\n" ker_lines "${ker_lines}")
-# Unescape semicolon
-string (REGEX REPLACE "\\\\;" ";" ker_lines "${ker_lines}")
-# Escape quatation marks
-string(REGEX REPLACE "\"" "\\\\\"" ker_lines "${ker_lines}")
-# Add EOLs
-string(REGEX REPLACE " ?\n" "\\\\n\",\n\"" ker_lines "${ker_lines}")
-# Replace square brackets back
-string(REGEX REPLACE "__BRACKET0__" "[" ker_lines "${ker_lines}")
-string(REGEX REPLACE "__BRACKET1__" "]" ker_lines "${ker_lines}")
+get_filename_component(cl_file_name ${CL_FILE} NAME_WE)
+get_filename_component(cl_file_ext ${CL_FILE} EXT)
 
-get_filename_component(ker_name ${KER_FILE} NAME_WE)
+# Split string into concatenated parts to circumvent the limitation on Windows
+string(REGEX REPLACE "\n" " )==\"\"\\\\n\"\nR\"==(" cl_file_lines "${cl_file_lines}")
 
-set(ker_lang "ocl")
+if(cl_file_ext STREQUAL ".cl")
+    set(cl_file_contents  "const char *${cl_file_name}_kernel = R\"==(${cl_file_lines})==\";")
+elseif(cl_file_ext STREQUAL ".h")
+    set(cl_file_contents  "const char *${cl_file_name}_header = R\"==(${cl_file_lines})==\";")
+else()
+    message(FATAL_ERROR "Unknown file extensions: ${cl_file_ext}")
+endif()
 
-set(ker_contents  "const char *${ker_name}_kernel[] ={ \"${ker_lines}\", nullptr };")
-set(ker_contents "namespace ${ker_lang} {\n${ker_contents}\n}")
-set(ker_contents "namespace gpu {\n${ker_contents}\n}")
-set(ker_contents "namespace impl {\n${ker_contents}\n}")
-set(ker_contents "namespace dnnl {\n${ker_contents}\n}")
-file(WRITE ${GEN_FILE} "${ker_contents}")
+set(cl_file_contents "namespace ocl {\n${cl_file_contents}\n}")
+set(cl_file_contents "namespace gpu {\n${cl_file_contents}\n}")
+set(cl_file_contents "namespace impl {\n${cl_file_contents}\n}")
+set(cl_file_contents "namespace dnnl {\n${cl_file_contents}\n}")
+
+file(WRITE ${GEN_FILE} "${cl_file_contents}")

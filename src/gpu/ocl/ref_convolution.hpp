@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -33,6 +33,7 @@ namespace gpu {
 namespace ocl {
 
 struct ref_convolution_fwd_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_convolution_fwd_pd_t {
         using gpu_convolution_fwd_pd_t::gpu_convolution_fwd_pd_t;
 
@@ -63,6 +64,7 @@ struct ref_convolution_fwd_t : public gpu_primitive_t {
                     && this->set_default_formats()
                     && attr()->has_default_values(
                             attr_skip_mask, dst_md_.data_type)
+                    && attr_.set_default_formats(dst_md(0)) == status::success
                     && post_ops_with_binary_ok(attr(), dst_md()->data_type, 5)
                     && zero_points_ok(attr())
                     && IMPLICATION(!attr()->output_scales_.has_default_values(),
@@ -107,8 +109,6 @@ struct ref_convolution_fwd_t : public gpu_primitive_t {
 
         memory_desc_t scales_md_;
     };
-
-    ref_convolution_fwd_t(const pd_t *apd) : gpu_primitive_t(apd) {}
 
     status_t init(engine_t *engine) override {
         compute::kernel_ctx_t kernel_ctx;
@@ -157,6 +157,7 @@ private:
 };
 
 struct ref_convolution_bwd_data_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_convolution_bwd_data_pd_t {
         using gpu_convolution_bwd_data_pd_t::gpu_convolution_bwd_data_pd_t;
 
@@ -170,7 +171,9 @@ struct ref_convolution_bwd_data_t : public gpu_primitive_t {
                     && desc()->alg_kind == alg_kind::convolution_direct
                     && this->set_default_formats()
                     && attr()->has_default_values(attr_skip_mask)
-                    && post_ops_with_binary_ok(attr(), dst_md()->data_type);
+                    && post_ops_with_binary_ok(attr(), dst_md()->data_type)
+                    && attr_.set_default_formats(diff_src_md(0))
+                            == status::success;
             if (!ok) return status::unimplemented;
 
             return init_conf(engine);
@@ -192,8 +195,6 @@ struct ref_convolution_bwd_data_t : public gpu_primitive_t {
             return set_default_formats_common(dat_tag, wei_tag, dat_tag);
         }
     };
-
-    ref_convolution_bwd_data_t(const pd_t *apd) : gpu_primitive_t(apd) {}
 
     status_t init(engine_t *engine) override {
         compute::kernel_ctx_t kernel_ctx;
@@ -218,6 +219,7 @@ private:
 };
 
 struct ref_convolution_bwd_weights_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_convolution_bwd_weights_pd_t {
         using gpu_convolution_bwd_weights_pd_t::
                 gpu_convolution_bwd_weights_pd_t;
@@ -251,8 +253,6 @@ struct ref_convolution_bwd_weights_t : public gpu_primitive_t {
             return set_default_formats_common(dat_tag, wei_tag, dat_tag);
         }
     };
-
-    ref_convolution_bwd_weights_t(const pd_t *apd) : gpu_primitive_t(apd) {}
 
     status_t init(engine_t *engine) override {
         compute::kernel_ctx_t kernel_ctx;

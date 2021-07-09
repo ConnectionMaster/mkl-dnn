@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -61,7 +61,7 @@ status_t ocl_gpu_engine_t::init() {
 
 status_t ocl_gpu_engine_t::create_memory_storage(
         memory_storage_t **storage, unsigned flags, size_t size, void *handle) {
-    auto _storage = new ocl_memory_storage_t(this);
+    auto _storage = new ocl_buffer_memory_storage_t(this);
     if (_storage == nullptr) return status::out_of_memory;
     status_t status = _storage->init(flags, size, handle);
     if (status != status::success) {
@@ -79,15 +79,6 @@ status_t ocl_gpu_engine_t::create_stream(stream_t **stream, unsigned flags) {
 status_t ocl_gpu_engine_t::create_stream(
         stream_t **stream, cl_command_queue queue) {
     return ocl_stream_t::create_stream(stream, this, queue);
-}
-
-cl_uint count_lines(const char **code) {
-    cl_uint i = 0;
-    while (*code) {
-        i++;
-        code++;
-    }
-    return i;
 }
 
 status_t ocl_gpu_engine_t::create_kernel(
@@ -148,8 +139,7 @@ static status_t get_program_binaries(
 
 status_t ocl_gpu_engine_t::create_kernels_from_ocl_source(
         std::vector<compute::kernel_t> *kernels,
-        const std::vector<const char *> &kernel_names,
-        const char **code_strings,
+        const std::vector<const char *> &kernel_names, const char *code_string,
         const compute::kernel_ctx_t &kernel_ctx) const {
     std::string options = kernel_ctx.options();
 
@@ -159,31 +149,65 @@ status_t ocl_gpu_engine_t::create_kernels_from_ocl_source(
             = utils::downcast<const ocl_gpu_device_info_t *>(device_info());
     options += " " + dev_info->get_cl_ext_options();
 
-    cl_int err;
-    cl_program program = clCreateProgramWithSource(
-            context(), count_lines(code_strings), code_strings, nullptr, &err);
-    OCL_CHECK(err);
+    const auto release_headers = [](const std::vector<cl_program> &headers) {
+        for (auto &p : headers) {
+            if (p) OCL_CHECK(clReleaseProgram(p));
+        }
+        return status::success;
+    };
 
-    cl_device_id dev = device();
-    err = clBuildProgram(program, 1, &dev, options.c_str(), nullptr, nullptr);
-    if (err != CL_SUCCESS) {
+    const auto print_debug_info = [](cl_int err, cl_program p, cl_device_id d) {
         // Return error if verbose is not enabled.
-        if (get_verbose() == 0) OCL_CHECK(err);
+        if (err == CL_SUCCESS || get_verbose() == 0) return err;
 
         size_t log_length = 0;
         err = clGetProgramBuildInfo(
-                program, dev, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_length);
+                p, d, CL_PROGRAM_BUILD_LOG, 0, nullptr, &log_length);
         assert(err == CL_SUCCESS);
 
         std::vector<char> log_buf(log_length);
-        err = clGetProgramBuildInfo(program, dev, CL_PROGRAM_BUILD_LOG,
-                log_length, log_buf.data(), nullptr);
+        err = clGetProgramBuildInfo(p, d, CL_PROGRAM_BUILD_LOG, log_length,
+                log_buf.data(), nullptr);
         assert(err == CL_SUCCESS);
         printf("Error during the build of OpenCL program.\nBuild "
                "log:\n%s\n",
                 log_buf.data());
+        return err;
+    };
+
+    cl_int err;
+    // Prepare kernel headers
+    const cl_uint n_headers = static_cast<cl_uint>(get_kernel_headers().size());
+    std::vector<cl_program> kernel_headers(n_headers);
+    for (cl_uint i = 0; i < n_headers; i++) {
+        const char *header = get_kernel_headers()[i];
+        kernel_headers[i] = clCreateProgramWithSource(
+                context(), 1, &header, nullptr, &err);
+        if (err != CL_SUCCESS) {
+            CHECK(release_headers(kernel_headers));
+            OCL_CHECK(err);
+        }
+    }
+
+    cl_program program = clCreateProgramWithSource(
+            context(), 1, &code_string, nullptr, &err);
+    if (err != CL_SUCCESS) {
+        CHECK(release_headers(kernel_headers));
         OCL_CHECK(err);
     }
+
+    cl_device_id dev = device();
+    auto kernel_header_names = get_kernel_header_names();
+    err = clCompileProgram(program, 1, &dev, options.c_str(), n_headers,
+            kernel_headers.data(), kernel_header_names.data(), nullptr,
+            nullptr);
+
+    CHECK(release_headers(kernel_headers));
+    OCL_CHECK(print_debug_info(err, program, dev));
+
+    program = clLinkProgram(context(), 1, &dev, options.c_str(), 1, &program,
+            nullptr, nullptr, &err);
+    OCL_CHECK(print_debug_info(err, program, dev));
 
     std::shared_ptr<compute::binary_t> shared_binary;
     CHECK(get_program_binaries(program, shared_binary));
@@ -215,7 +239,7 @@ std::function<void(void *)> ocl_gpu_engine_t::get_program_list_deleter() const {
 }
 
 status_t ocl_gpu_engine_t::init_device_info() {
-    device_info_.reset(new ocl_gpu_device_info_t());
+    device_info_ = std::make_shared<ocl_gpu_device_info_t>();
     CHECK(device_info_->init(this));
     return status::success;
 }

@@ -33,6 +33,7 @@ namespace impl {
 namespace gpu {
 
 #define MAX_NDIMS 6
+#define MAX_POST_OPS_SUPPORTED 32
 
 struct memory_desc_info_t {
     // Max 2 levels of blocking
@@ -87,8 +88,6 @@ struct attr_info_t {
         const auto &po = attr->post_ops_;
 
         attr_info_t attr_info;
-
-        attr_info.all_post_ops.copy_from(po);
 
         int binary_idx = po.find(primitive_kind::binary);
         attr_info.with_binary = (binary_idx != -1);
@@ -172,8 +171,6 @@ struct attr_info_t {
 
     bool initialized = false;
 
-    post_ops_t all_post_ops;
-
     bool with_binary;
     bool with_eltwise;
     int eltwise_idx;
@@ -211,7 +208,6 @@ struct offsets_t {
     int src_off[4][MAX_NDIMS];
     int wei_off[4][MAX_NDIMS];
     int dst_off[4][MAX_NDIMS];
-    int bias_off[4][MAX_NDIMS];
 };
 
 struct rnn_offsets_t {
@@ -241,8 +237,11 @@ enum conv_version_t {
     ver_unused,
     ver_1stconv,
     ver_16mb16c,
+    ver_32mb32c,
+    ver_32c,
     ver_8ow16c,
     ver_nhwc,
+    ver_nchw,
     ver_mb_block,
     ver_ow_block
 };
@@ -270,7 +269,8 @@ struct conv_conf_t {
     int icb;
     int ocb;
     int osp_chunk, mb_chunk, mb_block, slm_ic;
-    size_t wei_slm_size, src_slm_size;
+    int iw_tail;
+    size_t wei_slm_size, src_slm_size, dst_slm_size;
     int sub_group_size;
     size_t gws_d[3], lws_d[3];
     compute::dispatch_t dispatch;
@@ -315,6 +315,8 @@ struct conv_conf_t {
 struct pool_conf_t {
     int ndims;
     int mb, c;
+    int mb_padded;
+    int c_padded;
     int id, ih, iw, od, oh, ow;
     int stride_d, stride_h, stride_w;
     int kd, kh, kw;
@@ -477,9 +479,9 @@ struct bnorm_conf_t {
     bool with_relu, use_16mb_unroll, use_nhwc;
     int stat_ic;
     bool is_forward, is_backward;
-    bool use_scaleshift, save_stats, is_training;
+    bool use_scaleshift, use_scale, use_shift, save_stats, is_training;
     bool fuse_norm_relu, calculate_stats, calculate_diff_stats;
-    bool diff_scaleshift;
+    bool diff_scaleshift, diff_scale, diff_shift;
     float relu_negative_slope, eps;
     int sub_group_size;
     bool vectorize_calc_stats;
@@ -503,14 +505,23 @@ struct lnorm_conf_t {
     memory_desc_info_t stat_md_info;
 
     bool use_scaleshift;
+    bool use_scale;
+    bool use_shift;
     bool calculate_stats;
     bool save_stats;
     bool vectorize_calc_stats;
+    bool vectorize_bwd;
+    bool vectorize_bwd_scaleshift;
     float eps;
     int sub_group_size;
     int vect_dt_n;
+    int shift_off;
+    int n_chunk_size;
+    int n_chunks;
+    int vector_size_scaleshift;
 
     compute::dispatch_t dispatch_scaleshift;
+    compute::dispatch_t dispatch_scaleshift_finalize;
     compute::dispatch_t dispatch;
 };
 
@@ -519,6 +530,7 @@ struct binary_conf_t {
     int ndims, nvect;
     bool use_unroll_16b, src0_unroll_16b;
     bool is_ncX_layout;
+    bool plain_to_ABcd4a4b;
     data_type_t src0_data_type;
     data_type_t src1_data_type;
     data_type_t dst_data_type;
@@ -528,6 +540,12 @@ struct binary_conf_t {
     bool is_min;
     bool is_div;
     bool is_sub;
+    bool is_ge;
+    bool is_gt;
+    bool is_le;
+    bool is_lt;
+    bool is_eq;
+    bool is_ne;
     bool is_tensor_op;
     compute::dispatch_t dispatch;
     int dim0[MAX_NDIMS];
@@ -583,8 +601,36 @@ enum reorder_kernel_t {
     plain_xFxE_to_abcdef,
     transpose8x8,
     transpose16x16,
+    local8x8,
+    local16x16,
     reorder_nchw,
-    unaligned_sizes
+    unaligned_sizes,
+    reorder_alt,
+    vectorize_groups,
+    pad_innermost,
+    xb_to_xab_xba
+};
+
+struct vectorize_group_t {
+    int vector_dim;
+    int src_loop_dim;
+    int dst_loop_dim;
+    int group_size;
+    int innermost_size;
+};
+
+struct xb_to_xab_xba_t {
+    int vd;
+    int blk_size;
+    int src_blk_dim;
+    int src_blk_coeff;
+    int dst_blk_dim;
+    int dst_blk_coeff;
+};
+
+union reorder_implementation {
+    vectorize_group_t vg;
+    xb_to_xab_xba_t ab;
 };
 struct reorder_conf_t {
     bool has_padding;
@@ -601,6 +647,8 @@ struct reorder_conf_t {
 
     memory_desc_info_t src_md_info;
     memory_desc_info_t dst_md_info;
+
+    reorder_implementation aux_data;
 };
 
 // Concat
@@ -657,6 +705,8 @@ inline void set_default_pool_conf(pool_conf_t &conf,
     conf.mb = src_dims[0];
 
     conf.c = src_dims[1];
+    conf.mb_padded = src_mdw.padded_dims()[0];
+    conf.c_padded = src_mdw.padded_dims()[1];
     conf.id = (ndims == 5) ? src_dims[2] : 1;
     conf.ih = (ndims == 3) ? 1 : src_dims[ndims - 2];
     conf.iw = src_dims[ndims - 1];
@@ -877,6 +927,12 @@ inline void def_binary_alg_kinds(compute::kernel_ctx_t &kernel_ctx) {
     kernel_ctx.define_int("BINARY_MAX", alg_kind::binary_max);
     kernel_ctx.define_int("BINARY_DIV", alg_kind::binary_div);
     kernel_ctx.define_int("BINARY_SUB", alg_kind::binary_sub);
+    kernel_ctx.define_int("BINARY_GE", alg_kind::binary_ge);
+    kernel_ctx.define_int("BINARY_GT", alg_kind::binary_gt);
+    kernel_ctx.define_int("BINARY_LE", alg_kind::binary_le);
+    kernel_ctx.define_int("BINARY_LT", alg_kind::binary_lt);
+    kernel_ctx.define_int("BINARY_EQ", alg_kind::binary_eq);
+    kernel_ctx.define_int("BINARY_NE", alg_kind::binary_ne);
 }
 
 inline void def_eltwise_alg_kinds(compute::kernel_ctx_t &kernel_ctx) {
@@ -901,6 +957,7 @@ inline void def_eltwise_alg_kinds(compute::kernel_ctx_t &kernel_ctx) {
     kernel_ctx.define_int("POW", alg_kind::eltwise_pow);
     kernel_ctx.define_int("GELU_ERF", alg_kind::eltwise_gelu_erf);
     kernel_ctx.define_int("ROUND", alg_kind::eltwise_round);
+    kernel_ctx.define_int("HARDSWISH", alg_kind::eltwise_hardswish);
 
     kernel_ctx.define_int("RELU_DST", alg_kind::eltwise_relu_use_dst_for_bwd);
     kernel_ctx.define_int(
@@ -935,6 +992,7 @@ inline bool post_ops_with_binary_ok(const primitive_attr_t *attr,
             }
         }
         if (is_sum(po_idx)) {
+            if (p.entry_[po_idx].sum.zero_point != 0) return false;
             if (p.entry_[po_idx].sum.dt != dnnl_data_type_undef
                     && types::data_type_size(p.entry_[po_idx].sum.dt)
                             != types::data_type_size(dst_dt))
@@ -942,13 +1000,13 @@ inline bool post_ops_with_binary_ok(const primitive_attr_t *attr,
         }
     }
 
-    if (p.len() > 10) is_po_ok = false;
+    if (p.len() > MAX_POST_OPS_SUPPORTED) is_po_ok = false;
 
     return is_po_ok;
 }
 
 inline void def_post_ops_cfg(
-        compute::kernel_ctx_t &kernel_ctx, const post_ops_t &all_post_ops) {
+        compute::kernel_ctx_t &kernel_ctx, const post_ops_t &post_ops) {
     const int po_nop_id = 0;
     const int po_binary_id = 1;
     const int po_eltwise_id = 2;
@@ -995,12 +1053,37 @@ inline void def_post_ops_cfg(
                     "PO_" + std::to_string(idx) + "_KIND", po_eltwise_id);
             kernel_ctx.define_int(
                     "PO_" + std::to_string(idx) + "_ALG", e.eltwise.alg);
+            kernel_ctx.define_float(
+                    ("PO_" + std::to_string(idx) + "_ELTWISE_ALPHA").c_str(),
+                    e.eltwise.alpha);
+            kernel_ctx.define_float(
+                    ("PO_" + std::to_string(idx) + "_ELTWISE_BETA").c_str(),
+                    e.eltwise.beta);
+            kernel_ctx.define_float(
+                    ("PO_" + std::to_string(idx) + "_ELTWISE_SCALE").c_str(),
+                    e.eltwise.scale);
+        } else {
+            kernel_ctx.define_float(
+                    ("PO_" + std::to_string(idx) + "_ELTWISE_ALPHA").c_str(),
+                    1.0f);
+            kernel_ctx.define_float(
+                    ("PO_" + std::to_string(idx) + "_ELTWISE_BETA").c_str(),
+                    0.0f);
+            kernel_ctx.define_float(
+                    ("PO_" + std::to_string(idx) + "_ELTWISE_SCALE").c_str(),
+                    1.0f);
         }
         if (e.is_sum(false)) {
             kernel_ctx.define_int(
                     "PO_" + std::to_string(idx) + "_KIND", po_sum_id);
             kernel_ctx.define_int(
                     "PO_" + std::to_string(idx) + "_ALG", alg_kind::undef);
+            kernel_ctx.define_float(
+                    ("PO_" + std::to_string(idx) + "_SUM_SCALE").c_str(),
+                    e.sum.scale);
+        } else {
+            kernel_ctx.define_float(
+                    ("PO_" + std::to_string(idx) + "_SUM_SCALE").c_str(), 1.0f);
         }
         if (!(e.is_binary() || e.is_eltwise(false) || e.is_sum(false))) {
             // empty post op
@@ -1013,88 +1096,67 @@ inline void def_post_ops_cfg(
         }
         po_kernel_args += ", const __global PO_" + std::to_string(idx)
                 + "_BIN_ARG_DATA_T *po_" + std::to_string(idx) + "_binary_arg";
-        po_kernel_args
-                += ", float po_" + std::to_string(idx) + "_eltwise_alpha";
-        po_kernel_args += ", float po_" + std::to_string(idx) + "_eltwise_beta";
-        po_kernel_args
-                += ", float po_" + std::to_string(idx) + "_eltwise_scale";
-        po_kernel_args += ", float po_" + std::to_string(idx) + "_sum_scale";
     };
 
-    for (int idx = 0; idx < all_post_ops.len();
-            ++idx, ++nof_supported_post_ops) {
+    for (int idx = 0; idx < post_ops.len(); ++idx, ++nof_supported_post_ops) {
         const std::string bin_arg_name
                 = "PO_" + std::to_string(idx) + "_BIN_ARG";
-        add_po_defines(bin_arg_name, all_post_ops.entry_[idx], idx);
-    }
-    // There should always be 0 or 10 postops, so add empty ones if needed
-    if (all_post_ops.len() > 0) {
-        post_ops_t::entry_t empty_po = post_ops_t::entry_t();
-        for (int idx = all_post_ops.len(); idx < 10;
-                ++idx, ++nof_supported_post_ops) {
-            const std::string bin_arg_name
-                    = "PO_" + std::to_string(idx) + "_BIN_ARG";
-            add_po_defines(bin_arg_name, empty_po, idx);
-        }
+        add_po_defines(bin_arg_name, post_ops.entry_[idx], idx);
     }
 
     kernel_ctx.define_int("POST_OP_CHAIN_LENGTH", nof_supported_post_ops);
-    if (all_post_ops.len() > 0) {
+    if (post_ops.len() > 0) {
         // due to C macro limitations on which post op service is build always
-        // load bf16 convertion functions
+        // load bf16 conversion functions
         kernel_ctx.define_int("POST_OP_USING_BF16", 1);
     }
     po_kernel_args += "\"";
     kernel_ctx.add_option(po_kernel_args);
 }
 
-inline int append_post_ops_to_arg_list(const exec_ctx_t &ctx,
+inline int append_post_ops_to_arg_list_base(const exec_args_t &args,
         compute::kernel_arg_list_t &arg_list, int post_op_idx,
-        const post_ops_t &all_post_ops) {
+        const post_ops_t &post_ops) {
     auto set_arg_entry = [&](const post_ops_t::entry_t &e, int po_idx) {
         if (e.is_binary()) {
-            auto &binary_arg = CTX_IN_STORAGE(
+            auto arg = args.at(
                     DNNL_ARG_ATTR_MULTIPLE_POST_OP(po_idx) | DNNL_ARG_SRC_1);
+            assert(arg.is_const);
+
+            auto &binary_arg = arg.mem
+                    ? *(arg.mem->memory_storage())
+                    : dnnl::impl::memory_storage_t::empty_storage();
             arg_list.set(post_op_idx++, binary_arg);
+
         } else {
             arg_list.set(post_op_idx++, memory_storage_t::empty_storage());
         }
-
-        if (e.is_eltwise()) {
-            arg_list.set(post_op_idx++, e.eltwise.alpha);
-            arg_list.set(post_op_idx++, e.eltwise.beta);
-            arg_list.set(post_op_idx++, e.eltwise.scale);
-        } else {
-            arg_list.set(post_op_idx++, 1.0f); // _eltwise_alpha
-            arg_list.set(post_op_idx++, 0.0f); // _eltwise_beta
-            arg_list.set(post_op_idx++, 1.0f); // _eltwise_scale
-        }
-
-        if (e.is_sum(false)) {
-            arg_list.set(post_op_idx++, e.sum.scale);
-        } else {
-            arg_list.set(post_op_idx++, 1.0f);
-        }
     };
 
-    for (int idx = 0; idx < all_post_ops.len(); ++idx) {
-        set_arg_entry(all_post_ops.entry_[idx], idx);
-    }
-    // There should always be 0 or 10 postops, so add empty ones if needed
-    if (all_post_ops.len() > 0) {
-        post_ops_t::entry_t empty_po = post_ops_t::entry_t();
-        for (int idx = all_post_ops.len(); idx < 10; ++idx) {
-            set_arg_entry(empty_po, 0);
-        }
+    for (int idx = 0; idx < post_ops.len(); ++idx) {
+        set_arg_entry(post_ops.entry_[idx], idx);
     }
     return post_op_idx;
 }
+inline int append_post_ops_to_arg_list_gemm(const exec_args_t &args,
+        compute::kernel_arg_list_t &arg_list, int post_op_idx,
+        const post_ops_t &post_ops) {
+    return append_post_ops_to_arg_list_base(
+            args, arg_list, post_op_idx, post_ops);
+}
+inline int append_post_ops_to_arg_list(const exec_ctx_t &ctx,
+        compute::kernel_arg_list_t &arg_list, int post_op_idx,
+        const post_ops_t &post_ops) {
+    exec_args_t args;
+    return append_post_ops_to_arg_list_base(
+            ctx.args(), arg_list, post_op_idx, post_ops);
+}
 
 inline bool post_ops_preserves_zeroes(
-        const exec_ctx_t &ctx, const post_ops_t &all_post_ops) {
+        const exec_ctx_t &ctx, const post_ops_t &post_ops) {
     bool preserve_zeroes = true;
-    for (int idx = 0; idx < all_post_ops.len(); ++idx) {
-        const post_ops_t::entry_t &po_entry = all_post_ops.entry_[idx];
+    for (int idx = 0; idx < post_ops.len(); ++idx) {
+        const post_ops_t::entry_t &po_entry = post_ops.entry_[idx];
         if (po_entry.is_binary()) {
             // only binary mul is preserving zeroes
             preserve_zeroes &= po_entry.binary.alg
@@ -1109,11 +1171,11 @@ inline bool post_ops_preserves_zeroes(
     return preserve_zeroes;
 }
 
-inline void def_attr_info(
-        compute::kernel_ctx_t &kernel_ctx, const attr_info_t &attr_info) {
+inline void def_attr_info(compute::kernel_ctx_t &kernel_ctx,
+        const attr_info_t &attr_info, const post_ops_t &post_ops) {
     assert(attr_info.initialized);
 
-    kernel_ctx.define_int("WITH_POST_OP", attr_info.all_post_ops.len() > 0);
+    kernel_ctx.define_int("WITH_POST_OP", post_ops.len() > 0);
 
     kernel_ctx.define_int("WITH_ELTWISE", attr_info.with_eltwise);
     kernel_ctx.define_int("ELTWISE_IDX", attr_info.eltwise_idx);
@@ -1144,7 +1206,7 @@ inline void def_attr_info(
     def_binary_alg_kinds(kernel_ctx);
     def_eltwise_alg_kinds(kernel_ctx);
 
-    def_post_ops_cfg(kernel_ctx, attr_info.all_post_ops);
+    def_post_ops_cfg(kernel_ctx, post_ops);
 }
 
 inline void def_dispatch(compute::kernel_ctx_t &kernel_ctx,

@@ -98,7 +98,7 @@ bool parse_attr(attr_t &attr, const char *str,
                 "will iterate over all possible combinations.");
         notice_printed = true;
     }
-    SAFE_V(str2attr(&attr, str + pattern.size()));
+    SAFE(str2attr(&attr, str + pattern.size()), CRIT);
     return true;
 }
 
@@ -160,6 +160,18 @@ bool parse_skip_nonlinear(std::vector<bool> &skip,
     return parse_vector_option(skip, def_skip, str2bool, str, option_name);
 }
 
+bool parse_strides(std::vector<strides_t> &strides,
+        const std::vector<strides_t> &def_strides, const char *str,
+        const std::string &option_name /* = "strides"*/) {
+    auto str2strides = [&](const char *str) -> strides_t {
+        strides_t strides(STRIDES_SIZE);
+        parse_multi_dims(strides, str);
+        return strides;
+    };
+    return parse_vector_option(
+            strides, def_strides, str2strides, str, option_name);
+}
+
 bool parse_trivial_strides(std::vector<bool> &ts,
         const std::vector<bool> &def_ts, const char *str,
         const std::string &option_name /* = "trivial-strides"*/) {
@@ -197,7 +209,7 @@ bool parse_batch(const bench_f bench, const char *str,
         const std::string &option_name /* = "batch"*/) {
     const std::string pattern = get_pattern(option_name);
     if (pattern.find(str, 0, pattern.size()) != eol) {
-        SAFE_V(batch(str + pattern.size(), bench));
+        SAFE(batch(str + pattern.size(), bench), CRIT);
         return true;
     }
     return false;
@@ -255,6 +267,28 @@ void parse_multi_dims(std::vector<dims_t> &dims, const char *str) {
 // service functions
 static bool parse_bench_mode(
         const char *str, const std::string &option_name = "mode") {
+    const auto str2bench_mode = [](const std::string &_str) {
+        bench_mode_t mode;
+        for (size_t i = 0; i < _str.size(); i++) {
+            if (_str[i] == 'r' || _str[i] == 'R') mode |= RUN;
+            if (_str[i] == 'c' || _str[i] == 'C') mode |= CORR;
+            if (_str[i] == 'p' || _str[i] == 'P') mode |= PERF;
+            if (_str[i] == 'l' || _str[i] == 'L') mode |= LIST;
+        }
+        if (!(mode & LIST).none() && mode.count() > 1) {
+            fprintf(stderr,
+                    "ERROR: LIST mode is incompatible with any other modes. "
+                    "Please use just `--mode=L` instead.\n");
+            exit(2);
+        }
+        if (mode.none()) {
+            fprintf(stderr, "ERROR: empty mode is not allowed.\n");
+            exit(2);
+        }
+
+        return mode;
+    };
+
     return parse_single_value_option(
             bench_mode, CORR, str2bench_mode, str, option_name);
 }
@@ -297,8 +331,8 @@ static bool parse_engine(
     auto n_devices = dnnl_engine_get_count(engine_tgt_kind);
     if (engine_index >= n_devices) {
         fprintf(stderr,
-                "ERROR: requested engine with index %ld is not registred in "
-                "the system. Number of devices registred is %ld.\n",
+                "ERROR: requested engine with index %ld is not registered in "
+                "the system. Number of devices registered is %ld.\n",
                 (long)engine_index, (long)n_devices);
         exit(2);
     }
@@ -307,8 +341,18 @@ static bool parse_engine(
 
 static bool parse_fast_ref_gpu(
         const char *str, const std::string &option_name = "fast-ref-gpu") {
-    return parse_single_value_option(
+    bool parsed = parse_single_value_option(
             fast_ref_gpu, true, str2bool, str, option_name);
+#if DNNL_CPU_RUNTIME == DNNL_RUNTIME_NONE
+    if (parsed && fast_ref_gpu) {
+        fast_ref_gpu = false;
+        fprintf(stderr,
+                "%s driver: WARNING: option `fast_ref_gpu` is not supported "
+                "for GPU only configurations.\n",
+                driver_name);
+    }
+#endif
+    return parsed;
 }
 
 static bool parse_canonical(
@@ -346,15 +390,22 @@ static bool parse_cpu_isa_hints(
     return parsed;
 }
 
-static bool parse_sycl_memory_kind(
-        const char *str, const std::string &option_name = "sycl-memory-kind") {
-    const bool parsed = parse_single_value_option(sycl_memory_kind,
-            sycl_memory_kind_ext_t::usm, str2sycl_memory_kind, str,
-            option_name);
-    if (!parsed) return false;
-#ifndef DNNL_WITH_SYCL
+static bool parse_memory_kind(
+        const char *str, const std::string &option_name = "memory-kind") {
+    const bool parsed = parse_single_value_option(memory_kind,
+            memory_kind_ext_t::usm, str2memory_kind, str, option_name);
+
+    if (!parsed) {
+        const bool parsed_old_style
+                = parse_single_value_option(memory_kind, memory_kind_ext_t::usm,
+                        str2memory_kind, str, "sycl-memory-kind");
+        if (!parsed_old_style) return false;
+    }
+
+#if !defined(DNNL_WITH_SYCL) && DNNL_GPU_RUNTIME != DNNL_RUNTIME_OCL
     fprintf(stderr,
-            "ERROR: option `%s` is supported with DPC++ builds only, "
+            "ERROR: option `%s` is supported with DPC++ and OpenCL builds "
+            "only, "
             "exiting...\n",
             option_name.c_str());
     exit(2);
@@ -369,6 +420,12 @@ static bool parse_test_start(
             str, option_name);
 }
 
+static bool parse_attr_same_pd_check(const char *str,
+        const std::string &option_name = "attr-same-pd-check") {
+    return parse_single_value_option(
+            attr_same_pd_check, false, str2bool, str, option_name);
+}
+
 bool parse_bench_settings(const char *str) {
     last_parsed_is_problem = false; // if start parsing, expect an option
 
@@ -377,8 +434,8 @@ bool parse_bench_settings(const char *str) {
             || parse_engine(str) || parse_fast_ref_gpu(str)
             || parse_canonical(str) || parse_mem_check(str)
             || parse_skip_impl(str) || parse_allow_enum_tags_only(str)
-            || parse_cpu_isa_hints(str) || parse_sycl_memory_kind(str)
-            || parse_test_start(str);
+            || parse_cpu_isa_hints(str) || parse_memory_kind(str)
+            || parse_test_start(str) || parse_attr_same_pd_check(str);
 }
 
 void catch_unknown_options(const char *str) {

@@ -1,5 +1,5 @@
 #===============================================================================
-# Copyright 2018-2020 Intel Corporation
+# Copyright 2018-2021 Intel Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -24,7 +24,13 @@ set(Threading_cmake_included true)
 
 # CPU threading runtime specifies the threading used by the library:
 # sequential, OpenMP or TBB. In future it may be different from CPU runtime.
-set(DNNL_CPU_THREADING_RUNTIME "${DNNL_CPU_RUNTIME}")
+if(DNNL_CPU_RUNTIME STREQUAL "NONE")
+    set(DNNL_CPU_THREADING_RUNTIME "SEQ")
+elseif(DNNL_CPU_SYCL)
+    set(DNNL_CPU_THREADING_RUNTIME "TBB")
+else()
+    set(DNNL_CPU_THREADING_RUNTIME "${DNNL_CPU_RUNTIME}")
+endif()
 
 # Always require pthreads even for sequential threading (required for e.g.
 # std::call_once that relies on mutexes)
@@ -33,12 +39,13 @@ list(APPEND EXTRA_SHARED_LIBS "${CMAKE_THREAD_LIBS_INIT}")
 
 # A macro to avoid code duplication
 macro(find_package_tbb)
+    set(_cmake_proj_dir "${PROJECT_SOURCE_DIR}/cmake")
     if(WIN32)
-        find_package(TBB ${ARGN} COMPONENTS tbb HINTS cmake/win)
+        find_package(TBB ${ARGN} COMPONENTS tbb HINTS ${_cmake_proj_dir}/win)
     elseif(APPLE)
-        find_package(TBB ${ARGN} COMPONENTS tbb HINTS cmake/mac)
+        find_package(TBB ${ARGN} COMPONENTS tbb HINTS ${_cmake_proj_dir}/mac)
     elseif(UNIX)
-        find_package(TBB ${ARGN} COMPONENTS tbb HINTS cmake/lnx)
+        find_package(TBB ${ARGN} COMPONENTS tbb HINTS ${_cmake_proj_dir}/lnx)
     endif()
 
     if(TBB_FOUND)
@@ -69,4 +76,3 @@ macro(find_package_tbb)
         endforeach()
     endif()
 endmacro()
-

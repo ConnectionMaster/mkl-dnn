@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -17,7 +17,15 @@
 #ifndef GPU_JIT_JIT_GENERATOR_HPP
 #define GPU_JIT_JIT_GENERATOR_HPP
 
+#include "common/float16.hpp"
 #include "gpu/jit/jit_generator_base.hpp"
+
+namespace ngen {
+using half = dnnl::impl::float16_t;
+}
+
+#define NGEN_HALF_TYPE
+
 #include "gpu/jit/ngen/ngen_opencl.hpp"
 
 namespace dnnl {
@@ -28,7 +36,7 @@ namespace jit {
 using gpu_gen_t = ngen::HW;
 constexpr gpu_gen_t gpu_gen9 = ngen::HW::Gen9;
 constexpr gpu_gen_t gpu_gen11 = ngen::HW::Gen11;
-constexpr gpu_gen_t gpu_gen12lp = ngen::HW::Gen12LP;
+constexpr gpu_gen_t gpu_xe_lp = ngen::HW::Xe_LP;
 
 // nGEN jit generator
 //
@@ -84,8 +92,18 @@ constexpr gpu_gen_t gpu_gen12lp = ngen::HW::Gen12LP;
 //
 
 template <gpu_gen_t hw>
+struct jit_eltwise_injector_f32;
+
+template <gpu_gen_t hw>
+struct jit_post_op_injector;
+
+template <gpu_gen_t hw>
 class jit_generator : public ngen::OpenCLCodeGenerator<hw>,
                       public jit_generator_base {
+    friend struct jit_eltwise_injector_f32<hw>;
+
+    friend struct jit_post_op_injector<hw>;
+
 private:
 #ifdef CL_VERSION_2_0
     struct svm_deleter {
@@ -118,6 +136,17 @@ public:
     void dbg_alloc(cl_context context);
     void *dbg_memory() const { return dbg_memory_.get(); }
 #endif
+
+    void emath(ngen::MathFunction fc, int simd, ngen::GRF dst, ngen::GRF src) {
+        for (; simd > 0; simd -= 8, dst++, src++)
+            this->math(nstl::min(simd, 8), fc, dst, src);
+    }
+    void eexp(int simd, const ngen::GRF &dst, const ngen::GRF &src) {
+        emath(ngen::MathFunction::exp, simd, dst, src);
+    }
+    void einv(int simd, const ngen::GRF &dst, const ngen::GRF &src) {
+        emath(ngen::MathFunction::inv, simd, dst, src);
+    }
 };
 
 #ifdef CL_VERSION_2_0

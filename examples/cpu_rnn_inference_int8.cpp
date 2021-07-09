@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2018-2020 Intel Corporation
+* Copyright 2018-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -49,15 +49,15 @@ using namespace dnnl;
 
 using dim_t = dnnl::memory::dim;
 
-const dim_t batch = 64;
-const dim_t src_seq_length_max = 25;
-const dim_t tgt_seq_length_max = 27;
+const dim_t batch = 32;
+const dim_t src_seq_length_max = 10;
+const dim_t tgt_seq_length_max = 10;
 
-const dim_t feature_size = 1024;
+const dim_t feature_size = 256;
 
 const dim_t enc_bidir_n_layers = 1;
-const dim_t enc_unidir_n_layers = 7;
-const dim_t dec_n_layers = 8;
+const dim_t enc_unidir_n_layers = 3;
+const dim_t dec_n_layers = 4;
 
 const int lstm_n_gates = 4;
 
@@ -142,9 +142,24 @@ void compute_attention(float *context_vectors, dim_t src_seq_length_max,
     for (dim_t i = 0; i < batch; i++)
         exp_sums[i] = 0.0f;
 
-    PRAGMA_OMP_PARALLEL_FOR_COLLAPSE(2)
-    for (dim_t i = 0; i < src_seq_length_max; i++) {
-        for (dim_t j = 0; j < batch; j++) {
+    // For each batch j, in the expression: exp(A_i) / \sum_i exp(A_i)
+    // we calculate max_idx t so that A_i <= A_t and calculate the expression as
+    //         exp(A_i - A_t) / \sum_i exp(A_i - A_t)
+    // which mitigates the overflow errors
+    std::vector<dim_t> max_idx(batch, 0);
+    PRAGMA_OMP_PARALLEL_FOR_COLLAPSE(1)
+    for (dim_t j = 0; j < batch; j++) {
+        for (dim_t i = 1; i < src_seq_length_max; i++) {
+            if (alignments[i * batch + j] > alignments[(i - 1) * batch + j])
+                max_idx[j] = i;
+        }
+    }
+
+    PRAGMA_OMP_PARALLEL_FOR_COLLAPSE(1)
+    for (dim_t j = 0; j < batch; j++) {
+        auto max_idx_val = alignments[max_idx[j] * batch + j];
+        for (dim_t i = 0; i < src_seq_length_max; i++) {
+            alignments[i * batch + j] -= max_idx_val;
             alignments[i * batch + j] = expf(alignments[i * batch + j]);
             exp_sums[j] += alignments[i * batch + j];
         }
@@ -163,10 +178,10 @@ void compute_attention(float *context_vectors, dim_t src_seq_length_max,
                     + j]
                     = 0.0f;
 
-    PRAGMA_OMP_PARALLEL_FOR_COLLAPSE(3)
+    PRAGMA_OMP_PARALLEL_FOR_COLLAPSE(2)
     for (dim_t i = 0; i < batch; i++)
-        for (dim_t k = 0; k < src_seq_length_max; k++)
-            for (dim_t j = 0; j < feature_size; j++)
+        for (dim_t j = 0; j < feature_size; j++)
+            for (dim_t k = 0; k < src_seq_length_max; k++)
                 context_vectors[i * (feature_size + feature_size) + feature_size
                         + j]
                         += alignments[k * batch + i]

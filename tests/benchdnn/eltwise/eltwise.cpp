@@ -63,12 +63,11 @@ static int init_pd(dnnl_engine_t engine, const prb_t *prb,
     attr_args_t attr_args;
     attr_args.prepare_binary_post_op_mds(
             prb->attr, prb->ndims, prb->dims.data());
-    auto dnnl_attr = create_dnnl_attr(prb->attr, attr_args);
+    auto dnnl_attr = make_benchdnn_dnnl_wrapper(
+            create_dnnl_attr(prb->attr, attr_args));
 
     dnnl_status_t init_status
             = dnnl_primitive_desc_create(&epd, &ed, dnnl_attr, engine, nullptr);
-
-    dnnl_primitive_attr_destroy(dnnl_attr);
 
     if (init_status == dnnl_unimplemented)
         return res->state = UNIMPLEMENTED, OK;
@@ -79,12 +78,13 @@ static int init_pd(dnnl_engine_t engine, const prb_t *prb,
     if (maybe_skip(res->impl_name)) {
         BENCHDNN_PRINT(2, "SKIPPED: oneDNN implementation: %s\n",
                 res->impl_name.c_str());
-        DNN_SAFE(dnnl_primitive_desc_destroy(epd), WARN);
         return res->state = SKIPPED, res->reason = SKIP_IMPL_HIT, OK;
     } else {
         BENCHDNN_PRINT(
                 5, "oneDNN implementation: %s\n", res->impl_name.c_str());
     }
+
+    SAFE(check_pd_w_and_wo_attr(res, prb->attr, ed), WARN);
 
     return OK;
 }
@@ -220,7 +220,7 @@ int fill_data(const prb_t *prb, data_kind_t kind, dnn_mem_t &mem_dt,
     const int64_t n_chunks = 16;
     const int64_t chunk_size = div_up(nelems, n_chunks);
 
-    dnnl::impl::parallel_nd(n_chunks, [&](int idx_chunk) {
+    dnnl::impl::parallel_nd(n_chunks, [&](int64_t idx_chunk) {
         int64_t idx_start = idx_chunk * chunk_size;
         int64_t idx_end = MIN2(idx_start + chunk_size, nelems);
         // Note 1: we use a different seed for each chunk to avoid
@@ -315,17 +315,17 @@ int doit(const prb_t *prb, res_t *res) {
     if (bench_mode == LIST) return res->state = LISTED, OK;
 
     check_known_skipped_case(prb, res);
+    check_sum_post_ops(prb->attr, res);
     if (res->state == SKIPPED) return OK;
 
-    dnnl_primitive_t e {};
-    SAFE(init_prim(&e, init_pd, prb, res), WARN);
+    benchdnn_dnnl_wrapper_t<dnnl_primitive_t> prim;
+    SAFE(init_prim(prim, init_pd, prb, res), WARN);
     if (res->state == SKIPPED || res->state == UNIMPLEMENTED) return OK;
 
     const_dnnl_primitive_desc_t const_pd;
-    DNN_SAFE(dnnl_primitive_get_primitive_desc(e, &const_pd), CRIT);
+    DNN_SAFE(dnnl_primitive_get_primitive_desc(prim, &const_pd), CRIT);
 
     if (check_mem_size(const_pd) != OK) {
-        DNN_SAFE_V(dnnl_primitive_destroy(e));
         return res->state = SKIPPED, res->reason = NOT_ENOUGH_RAM, OK;
     }
 
@@ -369,18 +369,20 @@ int doit(const prb_t *prb, res_t *res) {
     // is invoked due to removed from stack.
     const float trh = get_eltwise_threshold(prb->dt, prb->alg, is_fwd);
     compare::compare_t cmp;
-    if (bench_mode & CORR) {
+    if (is_bench_mode(CORR)) {
         cmp.set_threshold(trh);
         cmp.set_zero_trust_percent(get_eltwise_zero_trust_percent(prb));
 
-        const auto eltwise_add_check = [&](int64_t i, float got, float diff) {
-            // Some algorithms require absolute value comparison for inputs
-            // where catastrophic cancellation may happen.
-            const float src = arg_fp.get_elem(i);
-            if (check_abs_err(prb, src, trh)) return diff <= trh;
-            if (prb->attr.post_ops.binary_index() != -1) return diff <= trh;
-            return false;
-        };
+        const auto eltwise_add_check =
+                [&](const compare::compare_t::driver_check_func_args_t &args) {
+                    // Some algorithms require absolute value comparison for inputs
+                    // where catastrophic cancellation may happen.
+                    const float src = arg_fp.get_elem(args.idx);
+                    if (check_abs_err(prb, src, trh)) return args.diff <= trh;
+                    if (prb->attr.post_ops.binary_index() != -1)
+                        return args.diff <= trh;
+                    return false;
+                };
         cmp.set_driver_check_function(eltwise_add_check);
     }
 
@@ -390,9 +392,9 @@ int doit(const prb_t *prb, res_t *res) {
         args.set(DNNL_ARG_SCRATCHPAD, scratchpad_dt);
         args.set(binary_po_args, binary_po_dt);
 
-        SAFE(execute_and_wait(e, args), WARN);
+        SAFE(execute_and_wait(prim, args), WARN);
 
-        if (bench_mode & CORR) {
+        if (is_bench_mode(CORR)) {
             compute_ref_fwd(prb, src_fp, binary_po_fp, dst_fp);
             SAFE(cmp.compare(dst_fp, dst_dt, prb->attr, res), WARN);
         }
@@ -416,7 +418,7 @@ int doit(const prb_t *prb, res_t *res) {
         args.set(DNNL_ARG_SCRATCHPAD, scratchpad_dt);
 
         if (prb->use_dst()) {
-            if (bench_mode & CORR)
+            if (is_bench_mode(CORR))
                 compute_ref_fwd(prb, src_fp, binary_po_fp, dst_fp);
             SAFE(dst_dt.reorder(dst_fp), WARN);
             // make dst_fp of same values as for bf16, otherwise there are high
@@ -427,19 +429,15 @@ int doit(const prb_t *prb, res_t *res) {
         } else {
             args.set(DNNL_ARG_SRC, src_dt);
         }
-        SAFE(execute_and_wait(e, args), WARN);
+        SAFE(execute_and_wait(prim, args), WARN);
 
-        if (bench_mode & CORR) {
+        if (is_bench_mode(CORR)) {
             compute_ref_bwd(prb, arg_fp, d_dst_fp, d_src_fp);
             SAFE(cmp.compare(d_src_fp, d_src_dt, prb->attr, res), WARN);
         }
     }
 
-    measure_perf(res->timer, e, args);
-
-    DNN_SAFE_V(dnnl_primitive_destroy(e));
-
-    return OK;
+    return measure_perf(res->timer, prim, args);
 }
 
 } // namespace eltwise

@@ -48,6 +48,7 @@ struct primitive_t : public c_compatible {
 
     status_t init(engine_t *engine, bool use_global_scratchpad) {
         CHECK(init(engine));
+        CHECK(init_cached_resource(engine));
         use_global_scratchpad_ = use_global_scratchpad;
         return status::success;
     }
@@ -61,6 +62,23 @@ struct primitive_t : public c_compatible {
         return status::success;
     }
 
+    // Although this function is marked as `const` it changes primitive_t state.
+    // The only place where this function should be used is in:
+    // `init(engine_t *engine, bool use_global_scratchpad)` during primitive_t
+    // creation in `create_primitive_common`.
+    // The rationale behind marking it as `const` is to simplify enabling the
+    // primitive cache mode for storing compiled GPU kernels instead of
+    // binaries - DNNL_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE=ON and to preserve the
+    // current primitive cache implementation.
+    //
+    // The main idea is to create a resource inside the primitive_t only once
+    // and cache it as part of primitive_t.
+    // TODO: The ultimate goal is to switch completely to caching compiled
+    // GPU kernels therefore the code will be thrown out once it's done.
+    virtual status_t init_cached_resource(engine_t *engine) const {
+        return status::success;
+    }
+
     bool use_global_scratchpad() const { return use_global_scratchpad_; }
 
 protected:
@@ -70,7 +88,7 @@ protected:
             const pd_t *pd, engine_t *engine, bool use_global_scratchpad) {
 
         auto &global_primitive_cache = primitive_cache();
-        primitive_hashing::key_t key(pd, engine, dnnl_get_max_threads());
+        primitive_hashing::key_t key(pd, engine);
 
         std::promise<primitive_cache_t::cache_value_t> p_promise;
         // Try to get the shared future from the cache, if it's missing then
@@ -108,6 +126,17 @@ protected:
                 // Store the created primitive in the shared future and notify
                 // the waiting threads.
                 p_promise.set_value({p, status});
+
+                // The key_t contains pointers to op_desc and attr objects that
+                // reside in pd. When primitive_t is created it copies the pd
+                // and hence contains a copy.
+                // Since the created primitive_t is stored in the cache with
+                // the corresponding key, the key must contain pointers to
+                // op_desc and attr that reside in the coppied pd
+                // in the primitive_t.
+                // Therefore the pointers in the key, which has already been put
+                // into the cache, must be updated.
+                global_primitive_cache.update_entry(key, p->pd().get());
             }
         }
         primitive = std::make_pair(p, is_from_cache);

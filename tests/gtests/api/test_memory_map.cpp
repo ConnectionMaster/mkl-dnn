@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -26,14 +26,27 @@
 
 namespace dnnl {
 
+namespace {
+bool is_sycl_engine(dnnl_engine_kind_t eng_kind) {
+#if DNNL_CPU_RUNTIME == DNNL_RUNTIME_SYCL
+    if (eng_kind == dnnl_cpu) return true;
+#endif
+
+#if DNNL_GPU_RUNTIME == DNNL_RUNTIME_SYCL
+    if (eng_kind == dnnl_gpu) return true;
+#endif
+    return false;
+}
+} // namespace
+
 class memory_map_test_c_t
     : public ::testing::TestWithParam<dnnl_engine_kind_t> {
 protected:
     void SetUp() override {
-        auto engine_kind = GetParam();
-        if (dnnl_engine_get_count(engine_kind) == 0) return;
+        eng_kind = GetParam();
+        if (dnnl_engine_get_count(eng_kind) == 0) return;
 
-        DNNL_CHECK(dnnl_engine_create(&engine, engine_kind, 0));
+        DNNL_CHECK(dnnl_engine_create(&engine, eng_kind, 0));
         DNNL_CHECK(
                 dnnl_stream_create(&stream, engine, dnnl_stream_default_flags));
     }
@@ -43,6 +56,7 @@ protected:
         if (stream) { DNNL_CHECK(dnnl_stream_destroy(stream)); }
     }
 
+    dnnl_engine_kind_t eng_kind;
     dnnl_engine_t engine = nullptr;
     dnnl_stream_t stream = nullptr;
 };
@@ -52,6 +66,7 @@ class memory_map_test_cpp_t
 
 TEST_P(memory_map_test_c_t, MapNullMemory) {
     SKIP_IF(!engine, "Engine kind is not supported.");
+    SKIP_IF(is_sycl_engine(eng_kind), "Do not test C API with SYCL.");
 
     int ndims = 4;
     dnnl_dims_t dims = {2, 3, 4, 5};
@@ -72,6 +87,7 @@ TEST_P(memory_map_test_c_t, MapNullMemory) {
 
 HANDLE_EXCEPTIONS_FOR_TEST_P(memory_map_test_c_t, Map) {
     SKIP_IF(!engine, "Engine kind is not supported.");
+    SKIP_IF(is_sycl_engine(eng_kind), "Do not test C API with SYCL.");
 
     const int ndims = 1;
     const dnnl_dim_t N = 15;
@@ -89,9 +105,10 @@ HANDLE_EXCEPTIONS_FOR_TEST_P(memory_map_test_c_t, Map) {
     float buffer_ref[N];
     std::iota(buffer_ref, buffer_ref + N, 1);
 
-    void *mapped_ptr_ref;
+    void *mapped_ptr_ref = nullptr;
     DNNL_CHECK(dnnl_memory_map_data(mem_ref, &mapped_ptr_ref));
     float *mapped_ptr_ref_f32 = static_cast<float *>(mapped_ptr_ref);
+    GTEST_EXPECT_NE(mapped_ptr_ref_f32, nullptr);
     std::copy(buffer_ref, buffer_ref + N, mapped_ptr_ref_f32);
     DNNL_CHECK(dnnl_memory_unmap_data(mem_ref, mapped_ptr_ref));
 
@@ -113,9 +130,10 @@ HANDLE_EXCEPTIONS_FOR_TEST_P(memory_map_test_c_t, Map) {
     DNNL_CHECK(dnnl_stream_wait(stream));
 
     // Validate the results
-    void *mapped_ptr;
+    void *mapped_ptr = nullptr;
     DNNL_CHECK(dnnl_memory_map_data(mem, &mapped_ptr));
     float *mapped_ptr_f32 = static_cast<float *>(mapped_ptr);
+    GTEST_EXPECT_NE(mapped_ptr_f32, nullptr);
     for (size_t i = 0; i < N; i++) {
         ASSERT_EQ(mapped_ptr_f32[i], buffer_ref[i]);
     }
@@ -146,6 +164,7 @@ HANDLE_EXCEPTIONS_FOR_TEST_P(memory_map_test_cpp_t, Map) {
     std::iota(buffer_ref, buffer_ref + N, 1);
 
     float *mapped_ptr_ref = mem_ref.map_data<float>();
+    GTEST_EXPECT_NE(mapped_ptr_ref, nullptr);
     std::copy(buffer_ref, buffer_ref + N, mapped_ptr_ref);
     mem_ref.unmap_data(mapped_ptr_ref);
 
@@ -160,6 +179,7 @@ HANDLE_EXCEPTIONS_FOR_TEST_P(memory_map_test_cpp_t, Map) {
     strm.wait();
 
     float *mapped_ptr = mem.map_data<float>();
+    GTEST_EXPECT_NE(mapped_ptr, nullptr);
     for (size_t i = 0; i < N; i++) {
         ASSERT_EQ(mapped_ptr[i], buffer_ref[i]);
     }

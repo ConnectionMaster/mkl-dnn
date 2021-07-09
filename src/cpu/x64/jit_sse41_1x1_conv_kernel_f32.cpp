@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -112,7 +112,7 @@ void jit_sse41_1x1_conv_kernel_f32::generate_bcast_loop(int load_loop_blk) {
 }
 
 size_t jit_sse41_1x1_conv_kernel_f32::get_fwd_output_ptr_l_off(
-        int i, int j, int n) {
+        int i, int j, int n) const {
     return i * get_output_i_offset(jcp) + j * get_output_j_offset(jcp) + n * 4;
 }
 
@@ -613,8 +613,12 @@ status_t jit_sse41_1x1_conv_kernel_f32::init_conf(jit_1x1_conv_conf_t &jcp,
     using namespace injector;
     static constexpr bool sum_at_pos_0_only = true;
     static constexpr bool sum_requires_scale_one = true;
+    static constexpr bool sum_requires_zp_zero = true;
     const bool post_ops_ok_ = post_ops_ok({sse41, {eltwise, binary, sum},
-            jcp.post_ops, &dst_d, sum_at_pos_0_only, sum_requires_scale_one});
+            jcp.post_ops, &dst_d, sum_at_pos_0_only, sum_requires_scale_one,
+            sum_requires_zp_zero,
+            {broadcasting_strategy_t::scalar,
+                    broadcasting_strategy_t::per_oc}});
     if (!post_ops_ok_) return status::unimplemented;
 
     const auto dat_tag_nxc = utils::pick(ndims - 3, nwc, nhwc);

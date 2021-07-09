@@ -537,6 +537,53 @@ typedef enum {
     dnnl_adefcb,
     dnnl_adefCb2c,
     dnnl_adefCb4c,
+    dnnl_AB16b32a4b,
+    dnnl_AB16b48a4b,
+    dnnl_AB16b64a4b,
+    dnnl_AB16b16a2b,
+    dnnl_AB16b32a2b,
+    dnnl_AB16b48a2b,
+    dnnl_AB16b64a2b,
+    dnnl_ABc16b32a4b,
+    dnnl_ABc16b48a4b,
+    dnnl_ABc16b64a4b,
+    dnnl_ABc16b32a2b,
+    dnnl_ABc16b48a2b,
+    dnnl_ABc16b64a2b,
+    dnnl_ABcd16b32a4b,
+    dnnl_ABcd16b48a4b,
+    dnnl_ABcd16b64a4b,
+    dnnl_ABcd16b32a2b,
+    dnnl_ABcd16b48a2b,
+    dnnl_ABcd16b64a2b,
+    dnnl_ABcde16b32a4b,
+    dnnl_ABcde16b48a4b,
+    dnnl_ABcde16b64a4b,
+    dnnl_ABcde16b32a2b,
+    dnnl_ABcde16b48a2b,
+    dnnl_ABcde16b64a2b,
+    dnnl_ABc32a16b,
+    dnnl_ABcd32a16b,
+    dnnl_ABcde32a16b,
+    dnnl_AB48a16b,
+    dnnl_AB48a32b,
+    dnnl_ABc40a16b,
+    dnnl_ABc40a32b,
+    dnnl_aBC48b16c,
+    dnnl_aBC48b32c,
+    dnnl_ABcd40a16b,
+    dnnl_ABcd40a32b,
+    dnnl_abCd32c,
+    dnnl_abdCe32c,
+    dnnl_abdCE32c2e,
+    dnnl_BA16a16b2a,
+    dnnl_BA16a32b2a,
+    dnnl_BA16a48b2a,
+    dnnl_BA16a64b2a,
+    dnnl_BA16a16b4a,
+    dnnl_BA16a32b4a,
+    dnnl_BA16a48b4a,
+    dnnl_BA16a64b4a,
 
     /// Just a sentinel, not real memory format tag. Must be changed after new
     /// format tag is added.
@@ -666,10 +713,13 @@ typedef enum {
     /// 5D LSTM projection tensor
     dnnl_ldOi32o = dnnl_abDc32d,
     dnnl_ldOI32o4i = dnnl_abDC32d4c,
+    dnnl_ldIo32i = dnnl_abCd32c,
     /// 6D RNN weights tensor
     dnnl_ldgOi32o = dnnl_abdEc32e,
     dnnl_ldgOI32o2i = dnnl_abdEC32e2c,
     dnnl_ldgOI32o4i = dnnl_abdEC32e4c,
+    dnnl_ldgIo32i = dnnl_abdCe32c,
+    dnnl_ldgIO32i2o = dnnl_abdCE32c2e,
 
     // Opaque data types, are not to be used explicitly
 
@@ -713,6 +763,9 @@ typedef enum {
     dnnl_NCw16n16c = dnnl_ABc16a16b,
     dnnl_NCdhw16n16c = dnnl_ABcde16a16b,
     dnnl_NChw16n16c = dnnl_ABcd16a16b,
+    dnnl_NCw32n16c = dnnl_ABc32a16b,
+    dnnl_NChw32n16c = dnnl_ABcd32a16b,
+    dnnl_NCdhw32n16c = dnnl_ABcde32a16b,
     dnnl_NCw32n32c = dnnl_ABc32a32b,
     dnnl_NChw32n32c = dnnl_ABcd32a32b,
     dnnl_NCdhw32n32c = dnnl_ABcde32a32b,
@@ -1013,6 +1066,31 @@ typedef enum {
     dnnl_gdhwio = dnnl_adefcb,
     dnnl_gdhwIo2i = dnnl_adefCb2c,
     dnnl_gdhwIo4i = dnnl_adefCb4c,
+    dnnl_OI16i32o4i = dnnl_AB16b32a4b,
+    dnnl_OI16i48o4i = dnnl_AB16b48a4b,
+    dnnl_OI16i64o4i = dnnl_AB16b64a4b,
+    dnnl_OI16i16o2i = dnnl_AB16b16a2b,
+    dnnl_OI16i32o2i = dnnl_AB16b32a2b,
+    dnnl_OI16i48o2i = dnnl_AB16b48a2b,
+    dnnl_OI16i64o2i = dnnl_AB16b64a2b,
+    dnnl_OIw16i32o4i = dnnl_ABc16b32a4b,
+    dnnl_OIw16i48o4i = dnnl_ABc16b48a4b,
+    dnnl_OIw16i64o4i = dnnl_ABc16b64a4b,
+    dnnl_OIw16i32o2i = dnnl_ABc16b32a2b,
+    dnnl_OIw16i48o2i = dnnl_ABc16b48a2b,
+    dnnl_OIw16i64o2i = dnnl_ABc16b64a2b,
+    dnnl_OIhw16i32o4i = dnnl_ABcd16b32a4b,
+    dnnl_OIhw16i48o4i = dnnl_ABcd16b48a4b,
+    dnnl_OIhw16i64o4i = dnnl_ABcd16b64a4b,
+    dnnl_OIhw16i32o2i = dnnl_ABcd16b32a2b,
+    dnnl_OIhw16i48o2i = dnnl_ABcd16b48a2b,
+    dnnl_OIhw16i64o2i = dnnl_ABcd16b64a2b,
+    dnnl_OIdhw16i32o4i = dnnl_ABcde16b32a4b,
+    dnnl_OIdhw16i48o4i = dnnl_ABcde16b48a4b,
+    dnnl_OIdhw16i64o4i = dnnl_ABcde16b64a4b,
+    dnnl_OIdhw16i32o2i = dnnl_ABcde16b32a2b,
+    dnnl_OIdhw16i48o2i = dnnl_ABcde16b48a2b,
+    dnnl_OIdhw16i64o2i = dnnl_ABcde16b64a2b,
 } dnnl_format_tag_t;
 
 /// @} dnnl_api_memory
@@ -1163,6 +1241,8 @@ typedef enum {
     dnnl_eltwise_logsigmoid = 0x50,
     /// Eltwise: mish
     dnnl_eltwise_mish = 0x60,
+    /// Eltwise: hardswish
+    dnnl_eltwise_hardswish = 0x70,
     /// Eltwise: ReLU (dst for backward)
     dnnl_eltwise_relu_use_dst_for_bwd = 0x100,
     /// Eltwise: hyperbolic tangent non-linearity (tanh) (dst for backward)
@@ -1215,6 +1295,18 @@ typedef enum {
     dnnl_binary_div = 0x1fff4,
     /// Binary sub
     dnnl_binary_sub = 0x1fff5,
+    /// Binary greater or equal
+    dnnl_binary_ge = 0x1fff6,
+    /// Binary greater than
+    dnnl_binary_gt = 0x1fff7,
+    /// Binary less or equal
+    dnnl_binary_le = 0x1fff8,
+    /// Binary less than
+    dnnl_binary_lt = 0x1fff9,
+    /// Binary equal
+    dnnl_binary_eq = 0x1fffa,
+    /// Binary not equal
+    dnnl_binary_ne = 0x1fffb,
     /// Nearest Neighbor Resampling Method
     dnnl_resampling_nearest = 0x2fff0,
     /// Linear Resampling Method
@@ -1289,6 +1381,23 @@ typedef enum {
     ///  - on training primitive requires workspace (required to be able to
     ///    perform backward pass)
     dnnl_fuse_norm_relu = 0x4U,
+
+    /// Use scale parameter
+    ///
+    /// If specified:
+    ///  - on forward propagation use scale for the batch normalization results
+    ///  - on backward propagation (for prop_kind == #dnnl_backward) compute
+    ///    diff wrt scale (hence one extra output used)
+    dnnl_use_scale = 0x8U,
+
+    /// Use shift parameter
+    ///
+    /// If specified:
+    ///  - on forward propagation use shift (aka bias) for the batch
+    ///    normalization results
+    ///  - on backward propagation (for prop_kind == #dnnl_backward) compute
+    ///    diff wrt shift (hence one extra output used)
+    dnnl_use_shift = 0x10U,
 } dnnl_normalization_flags_t;
 
 /// @} dnnl_api_primitives_common
@@ -1423,6 +1532,7 @@ typedef enum {
     dnnl_memory_extra_flag_gpu_rnn_u8s8_compensation
     = dnnl_memory_extra_flag_rnn_u8s8_compensation,
     dnnl_memory_extra_flag_compensation_conv_asymmetric_src = 0x8U,
+    dnnl_memory_extra_flag_rnn_s8s8_compensation = 0x16U,
 } dnnl_memory_extra_flags_t;
 
 /// Description of extra information stored in memory
@@ -1622,7 +1732,8 @@ typedef struct {
     /// #dnnl_eltwise_logistic, #dnnl_eltwise_exp, #dnnl_eltwise_gelu_tanh,
     /// #dnnl_eltwise_swish, #dnnl_eltwise_log, #dnnl_eltwise_clip,
     /// #dnnl_eltwise_clip_v2, #dnnl_eltwise_pow, #dnnl_eltwise_gelu_erf,
-    /// #dnnl_eltwise_round, #dnnl_eltwise_logsigmoid, #dnnl_eltwise_mish.
+    /// #dnnl_eltwise_round, #dnnl_eltwise_logsigmoid, #dnnl_eltwise_mish,
+    /// #dnnl_eltwise_hardswish.
     /// Possible values for passing destination memory on backward:
     /// #dnnl_eltwise_relu_use_dst_for_bwd, #dnnl_eltwise_tanh_use_dst_for_bwd,
     /// #dnnl_eltwise_elu_use_dst_for_bwd, #dnnl_eltwise_sqrt_use_dst_for_bwd,
@@ -1657,6 +1768,7 @@ typedef struct {
     ///  - #dnnl_eltwise_round: @p alpha and @p beta ignored
     ///  - #dnnl_eltwise_logsigmoid @p alpha and @p beta ignored
     ///  - #dnnl_eltwise_mish @p alpha and @p beta ignored
+    ///  - #dnnl_eltwise_hardswish @p alpha and @p beta ignored
     float alpha, beta;
 } dnnl_eltwise_desc_t;
 
@@ -2364,6 +2476,11 @@ typedef const struct dnnl_primitive *const_dnnl_primitive_t;
 /// Variance values tensor argument.
 #define DNNL_ARG_VARIANCE 50
 
+/// A special mnemonic for scale argument of normalization primitives.
+#define DNNL_ARG_SCALE 51
+/// A special mnemonic for shift argument of normalization primitives.
+#define DNNL_ARG_SHIFT 52
+
 /// Workspace tensor argument. Workspace is used to pass information
 /// from forward propagation to backward propagation computations.
 #define DNNL_ARG_WORKSPACE 64
@@ -2445,6 +2562,11 @@ typedef const struct dnnl_primitive *const_dnnl_primitive_t;
 /// Gradient (diff) of the bias tensor argument.
 #define DNNL_ARG_DIFF_BIAS 169
 
+/// A special mnemonic for scale argument of normalization primitives.
+#define DNNL_ARG_DIFF_SCALE 255
+/// A special mnemonic for shift argument of normalization primitives.
+#define DNNL_ARG_DIFF_SHIFT 256
+
 /// Output scaling factors provided at execution time.
 #define DNNL_ARG_ATTR_OUTPUT_SCALES 513
 
@@ -2470,8 +2592,8 @@ typedef const struct dnnl_primitive *const_dnnl_primitive_t;
 #define DNNL_ARG_ATTR_MULTIPLE_POST_OP(idx) \
     (DNNL_ARG_ATTR_MULTIPLE_POST_OP_BASE * ((idx) + 1))
 
-// XXX: next define should have a (1 << 20) = 1048576 value to preserve 5 bits
-// for DNNL_ARG_ATTR_MULTIPLE_POST_OP argument.
+/// Input scaling factors provided at execution time.
+#define DNNL_ARG_ATTR_INPUT_SCALES 1048576
 
 /// A structure that contains an index and a memory object, and is used to pass
 /// arguments to dnnl_primitive_execute().

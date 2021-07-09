@@ -21,6 +21,7 @@
 #include "common/type_helpers.hpp"
 #include "common/utils.hpp"
 
+#include "cpu/platform.hpp"
 #include "cpu/x64/injectors/injector_utils.hpp"
 #include "cpu/x64/injectors/jit_uni_binary_injector.hpp"
 #include "cpu/x64/injectors/jit_uni_eltwise_injector.hpp"
@@ -76,7 +77,7 @@ _jit_avx512_core_x8s8s32x_fwd_kernel<Vmm>::_jit_avx512_core_x8s8s32x_fwd_kernel(
                 this->param1, rhs_arg_static_params};
 
         postops_injector_ = utils::make_unique<
-                injector::jit_uni_postops_injector_t<avx512_core>>(
+                injector::jit_uni_postops_injector_t<avx512_core, Vmm>>(
                 this, jcp.post_ops, static_params);
     }
 }
@@ -150,10 +151,11 @@ static void iterate(const int nb_oc_block, const int ur_w, const F &f) {
 template <typename Vmm>
 void _jit_avx512_core_x8s8s32x_fwd_kernel<Vmm>::apply_sum(int ur_w,
         bool last_oc_block_flag, const int nb_oc_block, const int oc_block,
-        const float *p_sum_scale) {
+        const float *p_sum_scale, const int32_t *p_sum_zp) {
     if (jcp.with_sum) {
         const float sum_scale = *p_sum_scale;
-        const auto sum_injector_lam = [this, oc_block, sum_scale](
+        const int32_t sum_zp = *p_sum_zp;
+        const auto sum_injector_lam = [this, oc_block, sum_scale, sum_zp](
                                               const bool mask_flag, const int k,
                                               const int j) {
             int aux_output_offset = jcp.typesize_out
@@ -161,6 +163,7 @@ void _jit_avx512_core_x8s8s32x_fwd_kernel<Vmm>::apply_sum(int ur_w,
             auto addr = EVEX_compress_addr(reg_out, aux_output_offset);
             Vmm vmm = vmm_out(j, k);
             cvt2ps(jcp.dst_dt, vmm_prev_dst, addr, mask_flag);
+            if (sum_zp != 0) vsubps(vmm_prev_dst, vmm_sum_zp);
             if (sum_scale == 1.f)
                 vaddps(vmm, vmm_prev_dst);
             else
@@ -169,7 +172,12 @@ void _jit_avx512_core_x8s8s32x_fwd_kernel<Vmm>::apply_sum(int ur_w,
         const auto sum_injector = [=]() {
             iterate(nb_oc_block, ur_w, last_oc_block_flag, sum_injector_lam);
         };
-        if (sum_scale != 1.f) mov(reg_ptr_sum_scale, (size_t)p_sum_scale);
+        if (sum_scale != 1.f)
+            mov(reg_ptr_sum_scale, reinterpret_cast<size_t>(p_sum_scale));
+        if (sum_zp != 0) {
+            mov(reg_ptr_sum_zp, reinterpret_cast<size_t>(p_sum_zp));
+            vcvtdq2ps(vmm_sum_zp, ptr_b[reg_ptr_sum_zp]);
+        }
         postops_injector_->set_lambda_injector(
                 primitive_kind::sum, sum_injector);
     }
@@ -178,9 +186,10 @@ void _jit_avx512_core_x8s8s32x_fwd_kernel<Vmm>::apply_sum(int ur_w,
 template <typename Vmm>
 void _jit_avx512_core_x8s8s32x_fwd_kernel<Vmm>::apply_postops(int ur_w,
         bool last_oc_block_flag, const int nb_oc_block, const int oc_block,
-        const float *p_sum_scale) {
+        const float *p_sum_scale, const int32_t *p_sum_zp) {
     if (jcp.with_eltwise || jcp.with_binary || jcp.with_sum) {
-        apply_sum(ur_w, last_oc_block_flag, nb_oc_block, oc_block, p_sum_scale);
+        apply_sum(ur_w, last_oc_block_flag, nb_oc_block, oc_block, p_sum_scale,
+                p_sum_zp);
 
         injector_utils::vmm_index_set_t vmm_idxs;
         if (jcp.with_binary) {
@@ -244,9 +253,11 @@ void _jit_avx512_core_x8s8s32x_fwd_kernel<Vmm>::store_output(
     const auto &p = attr_.post_ops_;
     const int sum_idx = p.find(primitive_kind::sum);
     const float *p_sum_scale = nullptr;
+    const int32_t *p_sum_zp = nullptr;
     if (sum_idx != -1) {
         const auto &p_entry = p.entry_[sum_idx];
         p_sum_scale = &p_entry.sum.scale;
+        p_sum_zp = &p_entry.sum.zero_point;
     }
 
     if (jcp.signed_input && jcp.ver != ver_vnni) {
@@ -303,7 +314,8 @@ void _jit_avx512_core_x8s8s32x_fwd_kernel<Vmm>::store_output(
         }
     }
 
-    apply_postops(ur_w, last_oc_block_flag, nb_oc_block, oc_block, p_sum_scale);
+    apply_postops(ur_w, last_oc_block_flag, nb_oc_block, oc_block, p_sum_scale,
+            p_sum_zp);
 
     if (jcp.dst_zero_point) {
         mov(reg_dst_zero_point, ptr[param1 + GET_OFF(dst_zero_point)]);
@@ -1267,7 +1279,7 @@ void _jit_avx512_core_x8s8s32x_fwd_kernel<Vmm>::generate() {
 status_t jit_avx512_core_x8s8s32x_fwd_kernel::init_conf(jit_conv_conf_t &jcp,
         const convolution_desc_t &cd, memory_desc_t &src_md,
         memory_desc_t &weights_md, memory_desc_t &dst_md,
-        memory_desc_t &bias_md, const primitive_attr_t &attr, int nthreads) {
+        memory_desc_t &bias_md, primitive_attr_t &attr, int nthreads) {
     using namespace prop_kind;
 
     const memory_desc_wrapper src_d(&src_md);
@@ -1366,25 +1378,6 @@ status_t jit_avx512_core_x8s8s32x_fwd_kernel::init_conf(jit_conv_conf_t &jcp,
         if (jcp.ic % jcp.ic_block != 0 || jcp.oc % jcp.oc_block != 0)
             return status::unimplemented;
     }
-
-    const auto &post_ops = attr.post_ops_;
-    const int eltwise_ind = post_ops.find(primitive_kind::eltwise);
-    jcp.with_eltwise = eltwise_ind != -1;
-
-    const int binary_ind = post_ops.find(primitive_kind::binary);
-    jcp.with_binary = binary_ind != -1;
-
-    const int sum_ind = post_ops.find(primitive_kind::sum);
-    jcp.with_sum = sum_ind != -1;
-
-    jcp.post_ops = post_ops;
-
-    using namespace injector;
-    static constexpr bool sum_at_pos_0_only = false;
-    static constexpr bool sum_requires_scale_one = false;
-    const bool post_ops_ok_ = post_ops_ok({avx512_core, {eltwise, binary, sum},
-            jcp.post_ops, &dst_d, sum_at_pos_0_only, sum_requires_scale_one});
-    if (!post_ops_ok_) return status::unimplemented;
 
     const auto zp = attr.zero_points_;
     jcp.dst_zero_point = !zp.has_default_values(DNNL_ARG_DST);
@@ -1488,9 +1481,33 @@ status_t jit_avx512_core_x8s8s32x_fwd_kernel::init_conf(jit_conv_conf_t &jcp,
         if (bias_d.format_kind() == format_kind::any)
             CHECK(memory_desc_init_by_tag(bias_md, format_tag::x));
     }
-
     jcp.bia_dt = jcp.with_bias ? cd.bias_desc.data_type : data_type::undef;
     jcp.dst_dt = cd.dst_desc.data_type;
+
+    CHECK(attr.set_default_formats(&dst_md));
+
+    const auto &post_ops = attr.post_ops_;
+    const int eltwise_ind = post_ops.find(primitive_kind::eltwise);
+    jcp.with_eltwise = eltwise_ind != -1;
+
+    const int binary_ind = post_ops.find(primitive_kind::binary);
+    jcp.with_binary = binary_ind != -1;
+
+    const int sum_ind = post_ops.find(primitive_kind::sum);
+    jcp.with_sum = sum_ind != -1;
+
+    jcp.post_ops = post_ops;
+
+    using namespace injector;
+    static constexpr bool sum_at_pos_0_only = false;
+    static constexpr bool sum_requires_scale_one = false;
+    static constexpr bool sum_requires_zp_zero = false;
+    const bool post_ops_ok_ = post_ops_ok({avx512_core, {eltwise, binary, sum},
+            jcp.post_ops, &dst_d, sum_at_pos_0_only, sum_requires_scale_one,
+            sum_requires_zp_zero,
+            {broadcasting_strategy_t::scalar,
+                    broadcasting_strategy_t::per_oc}});
+    if (!post_ops_ok_) return status::unimplemented;
 
     jcp.typesize_in = types::data_type_size(src_d.data_type());
     jcp.typesize_out = types::data_type_size(dst_d.data_type());

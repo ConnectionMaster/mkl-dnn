@@ -36,6 +36,7 @@ namespace gpu {
 namespace ocl {
 
 struct gen9_wino_convolution_fwd_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_convolution_fwd_pd_t {
         pd_t(const convolution_desc_t *adesc, const primitive_attr_t *attr,
                 const convolution_fwd_pd_t *hint_fwd_pd)
@@ -57,7 +58,9 @@ struct gen9_wino_convolution_fwd_t : public gpu_primitive_t {
 
             bool ok = utils::one_of(this->desc()->prop_kind, forward_training,
                               forward_inference)
-                    && this->desc()->alg_kind == alg_kind::convolution_winograd
+                    && (this->desc()->alg_kind == alg_kind::convolution_winograd
+                            || this->desc()->alg_kind
+                                    == alg_kind::convolution_auto)
                     && utils::one_of(true,
                             expect_data_types(f32, f32, f32, f32, f32),
                             expect_data_types(f16, f16, f16, f16, f16))
@@ -72,10 +75,11 @@ struct gen9_wino_convolution_fwd_t : public gpu_primitive_t {
                                                     intel_subgroups_short))
                     && !has_zero_dim_memory()
                     && attr()->has_default_values(attr_skip_mask, dst_data_t)
-                    && post_ops_with_binary_ok(attr(), dst_data_t);
+                    && post_ops_with_binary_ok(attr(), dst_data_t)
+                    && attr_.set_default_formats(dst_md(0)) == status::success;
             if (!ok) return status::unimplemented;
 
-            status_t status = init_conf();
+            status_t status = init_conf(compute_engine);
             if (status != status::success) return status;
 
             init_scratchpad();
@@ -86,14 +90,12 @@ struct gen9_wino_convolution_fwd_t : public gpu_primitive_t {
             return ok ? status::success : status::unimplemented;
         }
 
-        status_t init_conf();
+        status_t init_conf(compute::compute_engine_t *engine);
         void init_scratchpad();
         status_t init_kernel_ctx(compute::kernel_ctx_t &kernel_ctx) const;
 
         conv_conf_t conf;
     };
-
-    gen9_wino_convolution_fwd_t(const pd_t *apd) : gpu_primitive_t(apd) {}
 
     status_t init(engine_t *engine) override {
         bool is_fused = pd()->conf.is_fused;
@@ -118,7 +120,7 @@ struct gen9_wino_convolution_fwd_t : public gpu_primitive_t {
         if (status != status::success) return status;
 
         std::vector<compute::kernel_t> kernels;
-        create_kernels(engine, &kernels, kernel_names, kernel_ctx);
+        CHECK(create_kernels(engine, &kernels, kernel_names, kernel_ctx));
         kernel_ = kernels[0];
         wei_trans_kernel_ = kernels[1];
         if (!kernel_ || !wei_trans_kernel_) return status::runtime_error;

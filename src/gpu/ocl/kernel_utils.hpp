@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -28,7 +28,9 @@ namespace impl {
 namespace gpu {
 namespace ocl {
 
-const char **get_kernel_source(const char *name);
+const char *get_kernel_source(const char *name);
+const std::vector<const char *> &get_kernel_headers();
+const std::vector<const char *> &get_kernel_header_names();
 
 template <typename GetKernelSourceFunc>
 status_t create_kernels(const compute::compute_engine_t *engine,
@@ -38,11 +40,10 @@ status_t create_kernels(const compute::compute_engine_t *engine,
     auto *ocl_engine = utils::downcast<const ocl::ocl_gpu_engine_t *>(engine);
 
     // Group kernels by their source.
-    std::unordered_map<const char **, std::vector<const char *>>
-            source_to_names;
+    std::unordered_map<const char *, std::vector<const char *>> source_to_names;
     for (auto &kv : kernel_list.kernels()) {
         auto &name = kv.first;
-        const char **source = get_kernel_source_func(name.c_str());
+        const char *source = get_kernel_source_func(name.c_str());
         source_to_names[source].push_back(name.c_str());
     }
 
@@ -65,15 +66,6 @@ inline status_t create_kernels(const compute::compute_engine_t *engine,
         const compute::kernel_ctx_t &kernel_ctx) {
     return create_kernels(
             engine, kernel_list, kernel_ctx, ocl::get_kernel_source);
-}
-
-inline compute::kernel_t create_kernel(const compute::compute_engine_t *engine,
-        const std::string &name, const compute::kernel_ctx_t &kernel_ctx) {
-    compute::kernel_t kernel;
-    compute::kernel_list_t kernel_list;
-    kernel_list.add(name.c_str(), &kernel);
-    create_kernels(engine, kernel_list, kernel_ctx);
-    return kernel;
 }
 
 } // namespace ocl

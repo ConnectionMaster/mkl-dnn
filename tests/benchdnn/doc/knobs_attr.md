@@ -3,13 +3,13 @@
 ## Usage
 ```
     --attr-oscale=POLICY[:SCALE[*]]
-    --attr-scales=ARG:POLICY[:SCALE][_...]
-    --attr-zero-points=ARG:POLICY:ZEROPOINT[*][_...]
-    --attr-post-ops='SUM[:SCALE[:DATA_TYPE]];'
-                    'ELTWISE[:ALPHA[:BETA[:SCALE]]];[...;]'
-                    'DW_K3S1P1[:DST_DT[:OUTPUTSCALE]];'
-                    'DW_K3S2P1[:DST_DT[:OUTPUTSCALE]];'
-                    'BINARY:DT[:POLICY];'
+    --attr-scales=ARG:POLICY[:SCALE[*]][+...]
+    --attr-zero-points=ARG:POLICY:ZEROPOINT[*][+...]
+    --attr-post-ops=SUM[:SCALE[:ZERO_POINT[:DATA_TYPE]]]
+                    ELTWISE[:ALPHA[:BETA[:SCALE]]]
+                    DW_K3S1P1[:DST_DT[:OUTPUTSCALE]]
+                    DW_K3S2P1[:DST_DT[:OUTPUTSCALE]]
+                    BINARY:DT[:POLICY[:TAG]]
 ```
 
 `--attr-oscale` defines output scale primitive attribute. `POLICY` specifies the
@@ -21,31 +21,43 @@ mark (`*`) is an optional addition to `SCALE` indicating the scales will be
 passed to a primitive at run-time.
 
 `POLICY` supported values are:
-  - `none`       (the default) means no output scale is applied.
-  - `common`     corresponds to `mask = 0` and means a whole tensor will be
-                 multiplied by a single SCALE value.
-  - `per_oc`     corresponds to `mask = 1 << 1` and means elements of dim1 will
-                 be multiplied by scale factors different for each point. Number
-                 of scale factors equals to dims[1].
-  - `per_dim_0`  corresponds to `mask = 1 << 0` and means elements of dim0 will
-                 be multiplied by scale factors different for each point. Number
-                 of scale factors equals to dims[0].
-  - `per_dim_1`  same as `per_oc`.
-  - `per_dim_01` corresponds to `mask = (1 << 0) + (1 << 1)` and means elements
-                 of dim0 and dim1 will be multiplied by scale factors different
-                 for a pair of {dim0, dim1} points. Number of scale factors
-                 equals to dims[0] * dims[1].
-  - `per_tensor` means each element of original tensor will be multiplied by
-                 a unique number. Number of scale factor equals to `nelems`.
-                 As of now supported only by binary post-ops.
+  - `none`           (the default) means no output scale is applied.
+  - `common`         corresponds to `mask = 0` and means a whole tensor will be
+                     multiplied by a single SCALE value.
+  - `per_oc`         corresponds to `mask = 1 << 1` and means elements of dim1
+                     will be multiplied by scale factors different for each
+                     point. Number of scale factors is equal to dims[1].
+  - `per_dim_0`      corresponds to `mask = 1 << 0` and means elements of dim0
+                     will be multiplied by scale factors different for each
+                     point. Number of scale factors is equal to dims[0].
+  - `per_dim_1`      same as `per_oc`.
+  - `per_dim_01`     corresponds to `mask = (1 << 0) + (1 << 1)` and means
+                     elements of dim0 and dim1 will be multiplied by scale
+                     factors different for a pair of {dim0, dim1} points.
+                     Number of scale factors is equal to dims[0] * dims[1].
+  - `per_mb_spatial` corresponds to `mask = (1 << 0) + (1 << 2) + (1 << 3)` and
+                     means elements of dim0, dim2 and dim3 will be multiplied
+                     by scale factors different for {dim0, dim2, dim3} points.
+                     Number of scale factors is equal to
+                     dims[0] * dims[2] * dim[3]. Mask is not fixed and can be
+                     different depending on ndims.
+  - `per_spatial`    corresponds to `mask = (1 << 2) + (1 << 3)` and means
+                     elements of dim2 and dim3 will be multiplied by scale
+                     factors different for {dim2, dim3} points. Number of scale
+                     factors is equal to dims[2] * dim[3]. Mask is not fixed
+                     and can be different depending on ndims.
+  - `per_tensor`     means each element of original tensor will be multiplied
+                     by a unique number. Number of scale factor is equal to
+                     `nelems`. As of now supported only by binary post-ops.
 
 `--attr-scales` defines input scales per memory argument primitive attribute.
 `ARG` specifies which memory argument will be modified with input scale.
-`POLICY` and `SCALE` have the same semantics and meaning as for `--attr-oscale`.
-To specify more than one memory argument, underscore (`_`) delimiter is used.
+`POLICY`, `SCALE` and `*` have the same semantics and meaning as for
+`--attr-oscale`. To specify more than one memory argument, plus delimiter `+` is
+used.
 
 `ARG` supported values are:
-  - `src` corresponds to `DNNL_ARG_SRC`
+  - `src` or `src0` corresponds to `DNNL_ARG_SRC`
   - `src1` corresponds to `DNNL_ARG_SRC_1`
 
 `POLICY` supported values are:
@@ -59,7 +71,7 @@ attribute. This attribute is supported only for integer data types as of now.
 is an integer value which will be subtracted from each tensor point. Asterisk
 mark (`*`) is an optional addition to `ZEROPOINT` indicating the value will be
 passed to a primitive at run-time. To specify more than one memory argument,
-underscore (`_`) delimiter is used.
+plus delimiter `+` is used.
 
 `ARG` supported values are:
   - `src` corresponds to `DNNL_ARG_SRC`
@@ -71,19 +83,16 @@ underscore (`_`) delimiter is used.
   - `per_dim_1` (for `src` and `dst`, at run-time only)
 
 `--attr-post-ops` defines post operations primitive attribute. Depending on
-post operations kind, the syntax differs, but regardless the kind, single quotes
-are used in the beginning and in the end in a string literal, even when empty
-post operations are passed.
-
-Note that from shell command line, double quotes are required in front of and
-behind single quotes. This is caused by shell interpretator messing with
-delimiters used inside post-ops content. Refer to examples below.
+post operations kind, the syntax differs. To specify more than one post
+operation, plus delimiter `+` is used.
 
 `SUM` post operation kind appends operation result to the output. It supports
-optional arguments `SCALE` parsed as a real number, which scales the operation
-result before appending, and `DATA_TYPE` argument which defines sum data type
-parameter. No data type limitations are applied. Only single `SUM` operation
-can be applied to the output tensor.
+optional arguments `SCALE` parsed as a real number, which scales the output
+before appending the result, `ZERO_POINT` parsed as a integer, which shifts the
+output before using the scale and `DATA_TYPE` argument which defines sum data
+type parameter. If invalid or `undef` value of `DATA_TYPE` is specified, an
+error will be returned. Only single `SUM` operation can be applied to the
+output tensor.
 
 `ELTWISE` post operation kind applies one of supported element-wise algorithms
 to the operation result and then stores it. It supports optional arguments
@@ -103,7 +112,11 @@ argument `OUTPUTSCALE` defines the semantics of output scale as for
 `BINARY` post operation kind applies one of supported binary algorithms to the
 operation result and then stores it. It requires mandatory argument of `DT`
 specifying data type of second memory operand. It supports optional argument of
-`POLICY` giving a hint what are the dimensions for a second memory operand.
+`POLICY` giving a hint what are the dimensions for a second memory operand. In
+case `POLICY` value is `per_tensor`, additional optional argument `TAG` is
+supported, positioned after `POLICY`, to specify memory physical format. `TAG`
+values use same notation as in drivers. The default value of `TAG` is `any`.
+Refer to [tags](knobs_tag.md) for details.
 
 Operations may be called in any order, e.g. apply `SUM` at first and then apply
 `ELTWISE`, or vice versa - apply `ELTWISE` and then `SUM` it with destination.
@@ -115,6 +128,7 @@ Operations may be called in any order, e.g. apply `SUM` at first and then apply
       - `exp_dst`
       - `gelu_erf`
       - `gelu_tanh`
+      - `hardswish`
       - `log`
       - `logistic`
       - `logistic_dst`
@@ -143,9 +157,17 @@ Operations may be called in any order, e.g. apply `SUM` at first and then apply
 
 `BINARY` supported values are:
   - `add`
+  - `div`
+  - `eq`
+  - `ge`
+  - `gt`
+  - `le`
+  - `lt`
   - `max`
   - `min`
   - `mul`
+  - `ne`
+  - `sub`
 
 ## Examples:
 
@@ -153,7 +175,7 @@ Run a set of f32 forward convolutions without bias appending accumulation into
 destination and perform relu on the output with scale set to 0.5:
 ``` sh
     ./benchdnn --conv --cfg=f32 --dir=FWD_D \
-               --attr-post-ops="'sum;relu:0.5'" --batch=conv_tails
+               --attr-post-ops=sum+relu:0.5 --batch=conv_tails
 ```
 
 Run a 1D-spatial reorder problem with s8 input data and u8 output data in four
@@ -169,8 +191,8 @@ Run a binary problem with s8 input data and u8 output data in nc layout
 applying scales to both inputs without any post operations:
 ``` sh
     ./benchdnn --binary --sdt=u8:s8 --ddt=u8 --stag=nc:nc \
-               --attr-scales=src:common:1.5_src1:common:2.5 \
-               --attr-post-ops="''" 100x100:100x100
+               --attr-scales=src:common:1.5+src1:common:2.5 \
+               --attr-post-ops= 100x100:100x100
 ```
 
 Run a 1x1 convolution fused with depthwise convolution where output scales set
@@ -180,11 +202,14 @@ The weights datatype is inferred as `s8`, `f32` and `bf16` for int8, f32 and
 bf16 convolutions respectively.
 ``` sh
   ./benchdnn --conv --cfg=u8s8u8 --attr-oscale=per_oc:0.5 \
-             --attr-post-ops="'relu;dw_k3s1p1:s8:per_oc:1.5;relu'" \
+             --attr-post-ops=relu+dw_k3s1p1:s8:per_oc:1.5+relu \
              ic16oc16ih4oh4kh1ph0
 ```
 
-Run a convolution problem with binary post operation:
+Run a convolution problem with binary post operation, first one adds single int
+value to the destination memory, second one adds a tensor of same size with
+`nhwc`-like physical memory layout with float values to the destination memory:
 ``` sh
-  ./benchdnn --conv --attr-post-ops="'add:s32:common'" ic16oc16ih4oh4kh1ph0
+  ./benchdnn --conv --attr-post-ops=add:s32:common,add:f32:per_tensor:axb
+             ic16oc16ih4oh4kh1ph0
 ```

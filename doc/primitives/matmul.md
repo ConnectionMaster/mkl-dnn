@@ -13,7 +13,7 @@ dev_guide_conventions):
 
 \f[
     \dst(m, n) =
-        \sum_{k=0}^{K} \left(
+        \sum_{k=0}^{K - 1} \left(
             \src(m, k) \cdot \weights(k, n)
         \right) +
         \bias(m, n)
@@ -23,12 +23,10 @@ The MatMul primitive also supports batching multiple independent matrix
 multiplication operations, in which case the tensors can be up to 12D:
 
 \f[
-    \dst(bs_0, bs_1, bs_2, \ldots, m, n) =
-        \sum_{k=0}^{K} \left(
-            \src(bs_0, bs_1, bs_2, \ldots, m, k) \cdot
-            \weights(bs_0, bs_1, bs_2, \ldots, k, n)
-        \right) +
-        \bias(bs_0, bs_1, bs_2, \ldots, m, n)
+    \dst(bs_0, bs_1, \ldots, m, n) =
+        \sum_{k=0}^{K - 1} \left(
+            \src(bs_0, bs_1, \ldots, m, k) \cdot
+            \weights(bs_0, bs_1, \ldots, k, n) \right) + \bias(bs_0, bs_1, \ldots, m, n)
 \f]
 
 MatMul also supports implicit broadcast semantics i.e., \src can be broadcasted
@@ -46,13 +44,13 @@ dimension, the following constraint must hold true:
 When executed, the inputs and outputs should be mapped to an execution
 argument index as specified by the following table.
 
-| Primitive input/output | Execution argument index                                                  |
-| ---                    | ---                                                                       |
-| \src                   | DNNL_ARG_SRC                                                              |
-| \weights               | DNNL_ARG_WEIGHTS                                                          |
-| \bias                  | DNNL_ARG_BIAS                                                             |
-| \dst                   | DNNL_ARG_DST                                                              |
-| \f$binary post-op\f$   | DNNL_ARG_ATTR_MULTIPLE_POST_OP(binary_post_op_position) \| DNNL_ARG_SRC_1 |
+| Primitive input/output      | Execution argument index                                                  |
+| ---                         | ---                                                                       |
+| \src                        | DNNL_ARG_SRC                                                              |
+| \weights                    | DNNL_ARG_WEIGHTS                                                          |
+| \bias                       | DNNL_ARG_BIAS                                                             |
+| \dst                        | DNNL_ARG_DST                                                              |
+| \f$\text{binary post-op}\f$ | DNNL_ARG_ATTR_MULTIPLE_POST_OP(binary_post_op_position) \| DNNL_ARG_SRC_1 |
 
 ## Implementation Details
 
@@ -81,8 +79,8 @@ argument index as specified by the following table.
    #DNNL_RUNTIME_DIM_VAL. It is user responsibility to make sure the dimensions
    for the tensors are valid.
 
-4. Currently multiple batch dimensions and broadcasting of batch dimensions of
-   `src` and `weights` is only supported for CPU engine.
+4. Multiple batch dimensions and broadcasting of batch dimensions of `src` and
+   `weights` are supported for both CPU and GPU engines.
 
    @sa Please check tutorials below to see #DNNL_RUNTIME_DIM_VAL support in use.
 
@@ -104,8 +102,15 @@ The MatMul primitive expects the following tensors:
 
 | Dims | Source                                                        | Weights                                                           | Destination                                                   | Bias                                                     |
 | :--  | :--                                                           | :--                                                               | :--                                                           | :--                                                      |
-| 2D   | \f$M \times K\f$                                              | \f$K \times N\f$                                                  | \f$M \times N\f$                                              | None or \f$(M \text{ or } 1) \times (N  \text{ or } 1)\f$|
-| ND   | \f$(\prod_{i=0}^{ND - 2} src{\_}dims[i]) \times M \times K\f$ | \f$(\prod_{i=0}^{ND - 2} weights{\_}dims[i]) \times K \times N\f$ | \f$(\prod_{i=0}^{ND - 2} dst{\_}dims[i]) \times M \times N\f$ | None or \f$\prod_{i=0}^{ND} (dst{\_}dims[i] { or } 1)\f$ |
+| 2D   | M \f$\times\f$ K                                              | K \f$\times\f$ N                                                  | M \f$\times\f$ N                                              | None or \f$(M \text{ or } 1) \times (N  \text{ or } 1)\f$|
+| ND   | S \f$\times\f$ M \f$\times\f$ K | W \f$\times\f$ K \f$\times\f$ N | D \f$\times\f$ M \f$\times\f$ N | None or B |
+
+where for the sake of notational convenience, we have
+
+\f[
+S = \prod_{i = 0}^{ND - 3} \mathrm{src\_dims}[i], \; W = \prod_{i = 0}^{ND - 3} \mathrm{weights\_dims}[i] \\
+D = \prod_{i = 0}^{ND - 3} \mathrm{\dst\_dims}[i], \; B = \prod_{i = 0}^{ND - 1} \left( \mathrm{\dst\_dims}[i] \mbox{ or } 1 \right)
+\f]
 
 The MatMul primitive is generally optimized for the case in which memory objects
 use plain memory formats. Additionally, the \src and \weights must have at least
@@ -159,6 +164,8 @@ in the argument with index set to
 1. Check @ref dev_guide_data_types.
 
 2. The CPU engine does not support `u8` data type for weights.
+
+3. GPU implementation is limited to 6D and plain memory formats.
 
 ## Performance Tips
 

@@ -45,13 +45,19 @@ status_t ref_binary_t::pd_t::init_conf(engine_t *engine) {
     conf.is_min = (alg == alg_kind::binary_min);
     conf.is_div = (alg == alg_kind::binary_div);
     conf.is_sub = (alg == alg_kind::binary_sub);
+    conf.is_ge = (alg == alg_kind::binary_ge);
+    conf.is_gt = (alg == alg_kind::binary_gt);
+    conf.is_le = (alg == alg_kind::binary_le);
+    conf.is_lt = (alg == alg_kind::binary_lt);
+    conf.is_eq = (alg == alg_kind::binary_eq);
+    conf.is_ne = (alg == alg_kind::binary_ne);
     conf.is_tensor_op = is_tensor_op();
     conf.is_dense = dst_d.is_dense();
     conf.same_src_dt = (src0_d.data_type() == src1_d.data_type());
     conf.is_same_md = (src0_d == dst_d) && (src1_d == dst_d);
     conf.attr_info = attr_info_t::create(attr());
     conf.with_binary_post_op
-            = conf.attr_info.all_post_ops.find(primitive_kind::binary) != -1;
+            = attr()->post_ops_.find(primitive_kind::binary) != -1;
     int ic_block_sz = 1;
     conf.use_unroll_16b = false;
     conf.src0_unroll_16b = false;
@@ -97,7 +103,7 @@ status_t ref_binary_t::pd_t::init_conf(engine_t *engine) {
             } else {
                 conf.dispatch.define_dim(utils::format("D%d", i),
                         nstl::min(i, ndims - 1),
-                        i < ndims ? dst_d.dims()[i] : 1);
+                        i < ndims ? dst_d.padded_dims()[i] : 1);
             }
         }
     }
@@ -117,6 +123,12 @@ status_t ref_binary_t::pd_t::init_kernel_ctx(
     kernel_ctx.define_int("IS_MIN", conf.is_min);
     kernel_ctx.define_int("IS_DIV", conf.is_div);
     kernel_ctx.define_int("IS_SUB", conf.is_sub);
+    kernel_ctx.define_int("IS_GE", conf.is_ge);
+    kernel_ctx.define_int("IS_GT", conf.is_gt);
+    kernel_ctx.define_int("IS_LE", conf.is_le);
+    kernel_ctx.define_int("IS_LT", conf.is_lt);
+    kernel_ctx.define_int("IS_EQ", conf.is_eq);
+    kernel_ctx.define_int("IS_NE", conf.is_ne);
     kernel_ctx.define_int("IS_TENSOR_OP", conf.is_tensor_op);
     kernel_ctx.define_int("IS_DENSE", conf.is_dense);
     kernel_ctx.define_int("IS_SAME_MD", conf.is_same_md);
@@ -136,7 +148,7 @@ status_t ref_binary_t::pd_t::init_kernel_ctx(
     def_memory_desc_info(kernel_ctx, conf.src1_md_info, "SRC1");
     def_memory_desc_info(kernel_ctx, conf.dst_md_info, "DST");
 
-    def_attr_info(kernel_ctx, conf.attr_info);
+    def_attr_info(kernel_ctx, conf.attr_info, attr()->post_ops_);
 
     def_dispatch(kernel_ctx, conf.dispatch);
 
@@ -149,7 +161,7 @@ status_t ref_binary_t::execute_ref(const exec_ctx_t &ctx) const {
 
     auto &src0 = CTX_IN_STORAGE(DNNL_ARG_SRC_0);
     auto &src1 = CTX_IN_STORAGE(DNNL_ARG_SRC_1);
-    auto &dst = CTX_OUT_CLEAN_STORAGE(DNNL_ARG_DST, status);
+    auto &dst = CTX_OUT_STORAGE(DNNL_ARG_DST);
     CHECK(status);
 
     const auto &conf = pd()->conf;
@@ -163,7 +175,7 @@ status_t ref_binary_t::execute_ref(const exec_ctx_t &ctx) const {
     arg_list.set(2, dst);
 
     unsigned arg_idx = append_post_ops_to_arg_list(
-            ctx, arg_list, 3, conf.attr_info.all_post_ops);
+            ctx, arg_list, 3, pd()->attr()->post_ops_);
 
     arg_list.set(arg_idx++, src0_scale);
     arg_list.set(arg_idx, src1_scale);

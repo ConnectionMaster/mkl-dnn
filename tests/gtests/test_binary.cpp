@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -178,11 +178,8 @@ protected:
                     src0_desc.get_size() / sizeof(src0_data_t), mem_A);
             fill_data<src1_data_t>(
                     src1_desc.get_size() / sizeof(src1_data_t), mem_B);
-
-            fill_data<src0_data_t>(
-                    src0_desc.get_size() / sizeof(src0_data_t), mem_A);
-            fill_data<src1_data_t>(
-                    src1_desc.get_size() / sizeof(src1_data_t), mem_B);
+            // Remove zeroes in src1 to avoid division by zero
+            remove_zeroes<src1_data_t>(mem_B);
 
             prim.execute(strm,
                     {{DNNL_ARG_SRC_0, mem_A}, {DNNL_ARG_SRC_1, mem_B},
@@ -192,6 +189,76 @@ protected:
         }
     }
 };
+
+struct binary_attr_test_t
+    : public ::testing::TestWithParam<
+              std::tuple<memory::dims, memory::dims, memory::format_tag>> {};
+
+HANDLE_EXCEPTIONS_FOR_TEST_P(
+        binary_attr_test_t, TestBinaryShouldCallSameImplementationWithPostops) {
+    auto engine_kind = get_test_engine_kind();
+    SKIP_IF(!DNNL_X64 || engine_kind != engine::kind::cpu,
+            "Binary impl_info_str should be same only on x64 CPU");
+    engine e {engine_kind, 0};
+
+    std::vector<memory::data_type> test_dts {
+            memory::data_type::f32, memory::data_type::s8};
+
+    if (!unsupported_data_type(memory::data_type::bf16))
+        test_dts.emplace_back(memory::data_type::bf16);
+
+    for (auto dt : test_dts) {
+        const auto &binary_tensor_dims = std::get<0>(GetParam());
+        const auto format_tag = std::get<2>(GetParam());
+
+        const memory::desc src_0_md {binary_tensor_dims, dt, format_tag};
+        const memory::desc src_1_md {binary_tensor_dims, dt, format_tag};
+        const memory::desc dst_md {binary_tensor_dims, dt, format_tag};
+
+        const auto binary_desc = binary::desc(
+                algorithm::binary_mul, src_0_md, src_1_md, dst_md);
+        std::string impl_info_no_postops;
+
+        auto pd = binary::primitive_desc(binary_desc, e);
+        ASSERT_NO_THROW(impl_info_no_postops = pd.impl_info_str(););
+
+        dnnl::primitive_attr attr;
+        const float scale = 1.f;
+        const float alpha = 1.f;
+        const float beta = 1.f;
+        dnnl::post_ops ops;
+
+        ops.append_sum(1.0);
+
+        ops.append_eltwise(scale, algorithm::eltwise_relu, alpha, beta);
+
+        const auto &binary_po_tensor_dims = std::get<1>(GetParam());
+        memory::desc src1_po_md(
+                binary_po_tensor_dims, data_type::f32, format_tag);
+        ops.append_binary(algorithm::binary_add, src1_po_md);
+
+        attr.set_post_ops(ops);
+
+        std::string impl_info_with_postops;
+
+        pd = binary::primitive_desc(binary_desc, attr, e);
+        ASSERT_NO_THROW(impl_info_with_postops = pd.impl_info_str(););
+        ASSERT_EQ(impl_info_no_postops, impl_info_with_postops);
+    }
+}
+
+INSTANTIATE_TEST_SUITE_P(BinaryTensorDims, binary_attr_test_t,
+        ::testing::Values(
+                // {{src0, src1, dst same_dim}, { binary post-op dim }}
+                std::make_tuple(memory::dims {1, 1024}, memory::dims {1, 1024},
+                        memory::format_tag::ab),
+                std::make_tuple(memory::dims {1, 1024, 1},
+                        memory::dims {1, 1024, 1}, memory::format_tag::abc),
+                std::make_tuple(memory::dims {1, 1024, 17},
+                        memory::dims {1, 1024, 1}, memory::format_tag::abc),
+                std::make_tuple(memory::dims {10, 1024, 17, 17},
+                        memory::dims {1, 1024, 1, 1},
+                        memory::format_tag::abcd)));
 
 static auto expected_failures = []() {
     return ::testing::Values(
@@ -216,7 +283,19 @@ static auto zero_dim = []() {
             binary_test_params_t {{tag::nhwc, tag::nChw16c}, tag::nhwc,
                     algorithm::binary_mul, {5, 16, 7, 0}},
             binary_test_params_t {{tag::nhwc, tag::nChw16c}, tag::nhwc,
-                    algorithm::binary_sub, {4, 0, 7, 5}});
+                    algorithm::binary_sub, {4, 0, 7, 5}},
+            binary_test_params_t {{tag::nhwc, tag::nChw16c}, tag::nhwc,
+                    algorithm::binary_ge, {4, 16, 7, 0}},
+            binary_test_params_t {{tag::nhwc, tag::nChw16c}, tag::nhwc,
+                    algorithm::binary_gt, {4, 16, 7, 0}},
+            binary_test_params_t {{tag::nhwc, tag::nChw16c}, tag::nhwc,
+                    algorithm::binary_le, {4, 16, 7, 0}},
+            binary_test_params_t {{tag::nhwc, tag::nChw16c}, tag::nhwc,
+                    algorithm::binary_lt, {4, 16, 7, 0}},
+            binary_test_params_t {{tag::nhwc, tag::nChw16c}, tag::nhwc,
+                    algorithm::binary_eq, {4, 16, 7, 0}},
+            binary_test_params_t {{tag::nhwc, tag::nChw16c}, tag::nhwc,
+                    algorithm::binary_ne, {4, 16, 7, 0}});
 };
 
 static auto simple_cases = []() {
@@ -232,7 +311,19 @@ static auto simple_cases = []() {
             binary_test_params_t {{tag::nchw, tag::nChw16c}, tag::any,
                     algorithm::binary_div, {5, 16, 8, 7}},
             binary_test_params_t {{tag::nchw, tag::nChw16c}, tag::any,
-                    algorithm::binary_sub, {5, 16, 8, 7}});
+                    algorithm::binary_sub, {5, 16, 8, 7}},
+            binary_test_params_t {{tag::nchw, tag::nChw16c}, tag::any,
+                    algorithm::binary_ge, {5, 16, 8, 7}},
+            binary_test_params_t {{tag::nchw, tag::nChw16c}, tag::any,
+                    algorithm::binary_gt, {5, 16, 8, 7}},
+            binary_test_params_t {{tag::nchw, tag::nChw16c}, tag::any,
+                    algorithm::binary_le, {5, 16, 8, 7}},
+            binary_test_params_t {{tag::nchw, tag::nChw16c}, tag::any,
+                    algorithm::binary_lt, {5, 16, 8, 7}},
+            binary_test_params_t {{tag::nchw, tag::nChw16c}, tag::any,
+                    algorithm::binary_eq, {5, 16, 8, 7}},
+            binary_test_params_t {{tag::nchw, tag::nChw16c}, tag::any,
+                    algorithm::binary_ne, {5, 16, 8, 7}});
 };
 
 #define INST_TEST_CASE(test) \

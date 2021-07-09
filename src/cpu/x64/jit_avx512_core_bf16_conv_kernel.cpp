@@ -121,7 +121,7 @@ _jit_avx512_core_bf16_fwd_kernel<Vmm>::_jit_avx512_core_bf16_fwd_kernel(
                 this->param1, rhs_arg_static_params};
 
         postops_injector_ = utils::make_unique<
-                injector::jit_uni_postops_injector_t<avx512_core>>(
+                injector::jit_uni_postops_injector_t<avx512_core, Vmm>>(
                 this, jcp.post_ops, static_params);
     }
     if (!isa_has_bf16(jcp.isa))
@@ -289,7 +289,8 @@ void _jit_avx512_core_bf16_fwd_kernel<Vmm>::store_dst(int ur_w) {
                 size_t aux_dst_offset = get_dst_offset(j, k);
                 auto addr = EVEX_compress_addr(reg_dst, aux_dst_offset);
                 // mask only needed for last oc_block
-                bool mask_flag = oc_tail && k + 1 == jcp.nb_oc_blocking;
+                bool mask_flag = oc_tail && k + 1 == jcp.nb_oc_blocking
+                        && is_dst_layout_nxc();
                 vmovups(addr, may_be_mask_vmm(vmm, mask_flag, false));
             }
     } else if (jcp.dst_dt == data_type::bf16) {
@@ -341,7 +342,7 @@ void _jit_avx512_core_bf16_fwd_kernel<Vmm>::store_dst(int ur_w) {
                     auto vmm_down_str = vmm_src_down(j, jcp.nb_oc_blocking);
                     vcvtneps2bf16(vmm_down_str, vmm_dst(j, k));
                     // for xmm, upper half is zero after conversion to
-                    // bf16, so mask always & mask for tails
+                    // bf16, so mask always.
                     const bool mask_flag = jcp.simd_w == 4;
                     vmovdqu16(addr, may_be_mask_vmm(vmm_down_str, mask_flag));
                 }
@@ -355,7 +356,8 @@ void _jit_avx512_core_bf16_fwd_kernel<Vmm>::store_dst(int ur_w) {
                     auto vmm_down = vmm_src_down(0, jcp.nb_oc_blocking);
                     bf16_emu_->vcvtneps2bf16(
                             Ymm(vmm_down.getIdx()), Zmm(vmm.getIdx()));
-                    bool mask_flag = (oc_tail && k + 1 == jcp.nb_oc_blocking)
+                    bool mask_flag = (oc_tail && k + 1 == jcp.nb_oc_blocking
+                                             && is_dst_layout_nxc())
                             // for xmm, upper half is zero after conversion to
                             // bf16, so mask always & mask for tails
                             || jcp.simd_w == 4;
@@ -829,7 +831,7 @@ void jit_avx512_core_bf16_fwd_kernel::init_scratchpad(
 status_t jit_avx512_core_bf16_fwd_kernel::init_conf(jit_conv_conf_t &jcp,
         const convolution_desc_t &cd, memory_desc_t &src_md,
         memory_desc_t &weights_md, memory_desc_t &dst_md,
-        memory_desc_t &bias_md, const primitive_attr_t &attr, int nthreads) {
+        memory_desc_t &bias_md, primitive_attr_t &attr, int nthreads) {
 
     using namespace prop_kind;
 
@@ -1013,13 +1015,20 @@ status_t jit_avx512_core_bf16_fwd_kernel::init_conf(jit_conv_conf_t &jcp,
     else
         jcp.oc_tail = jcp.with_binary ? jcp.oc_without_padding % jcp.simd_w : 0;
 
+    if (attr.set_default_formats(&dst_md) != status::success)
+        return status::unimplemented;
+
     jcp.post_ops = post_ops;
 
     using namespace injector;
     static constexpr bool sum_at_pos_0_only = true;
     static constexpr bool sum_requires_scale_one = true;
+    static constexpr bool sum_requires_zp_zero = true;
     const bool post_ops_ok_ = post_ops_ok({avx512_core, {eltwise, binary, sum},
-            jcp.post_ops, &dst_d, sum_at_pos_0_only, sum_requires_scale_one});
+            jcp.post_ops, &dst_d, sum_at_pos_0_only, sum_requires_scale_one,
+            sum_requires_zp_zero,
+            {broadcasting_strategy_t::scalar,
+                    broadcasting_strategy_t::per_oc}});
     if (!post_ops_ok_) return status::unimplemented;
 
     jcp.nb_ic = utils::div_up(jcp.ic, jcp.ic_block);
@@ -1109,7 +1118,8 @@ void _jit_avx512_core_bf16_bwd_data_kernel<Vmm>::store_output(int ur_w) {
                 size_t aux_diff_src_offset = get_diff_src_offset(j, k);
                 auto addr = EVEX_compress_addr(reg_src, aux_diff_src_offset);
                 // mask only needed for last ic_block
-                bool mask_flag = ic_tail && k + 1 == jcp.nb_ic_blocking;
+                bool mask_flag = ic_tail && k + 1 == jcp.nb_ic_blocking
+                        && is_dsrc_layout_nxc();
                 vmovups(addr, may_be_mask_vmm(vmm, mask_flag, false));
             }
     } else if (jcp.dst_dt == data_type::bf16) {
@@ -1174,7 +1184,7 @@ void _jit_avx512_core_bf16_bwd_data_kernel<Vmm>::store_output(int ur_w) {
                     auto vmm_down_str = Vmm_down_t(reg_idx);
                     vcvtneps2bf16(vmm_down_str, vmm_dsrc(j, k));
                     // for xmm, upper half is zero after conversion to
-                    // bf16, so mask always & mask for tails
+                    // bf16, so mask always.
                     bool mask_flag = jcp.simd_w == 4;
                     vmovdqu16(addr, may_be_mask_vmm(vmm_down_str, mask_flag));
                     store_idx++;
@@ -1190,7 +1200,8 @@ void _jit_avx512_core_bf16_bwd_data_kernel<Vmm>::store_output(int ur_w) {
                     auto vmm_down = vmm_ddst_down(0);
                     bf16_emu_->vcvtneps2bf16(
                             Ymm(vmm_down.getIdx()), Zmm(vmm.getIdx()));
-                    bool mask_flag = (ic_tail && k + 1 == jcp.nb_ic_blocking)
+                    bool mask_flag = (ic_tail && k + 1 == jcp.nb_ic_blocking
+                                             && is_dsrc_layout_nxc())
                             // for xmm, upper half is zero after conversion to
                             // bf16, so mask always & mask for tails
                             || jcp.simd_w == 4;
@@ -1959,7 +1970,7 @@ void jit_avx512_core_bf16_conv_bwd_weights_kernel_f32::
 }
 
 int jit_avx512_core_bf16_conv_bwd_weights_kernel_f32::interleave_w_reorder_size(
-        int ur_w) {
+        int ur_w) const {
     const int reorder_block = 16;
     return rnd_up(jcp.stride_w * (ur_w - 1) + jcp.kw, reorder_block);
 }

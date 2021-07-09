@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -22,11 +22,13 @@
 
 #include "common/c_types_map.hpp"
 #include "common/gemm_utils.hpp"
+#include "common/utils.hpp"
 #include "gpu/compute/compute.hpp"
 #include "gpu/compute/kernel.hpp"
 #include "gpu/gemm/gpu_gemm.hpp"
 #include "gpu/gpu_gemm_pd.hpp"
 #include "gpu/jit/gemm/gen_gemm_kernel.hpp"
+#include "gpu/primitive_conf.hpp"
 
 namespace dnnl {
 namespace impl {
@@ -34,6 +36,7 @@ namespace gpu {
 namespace jit {
 
 struct gen_gemm_t : public gpu_gemm_t {
+    using gpu_gemm_t::gpu_gemm_t;
 
     struct pd_t : public gpu_gemm_pd_t {
         using gpu_gemm_pd_t::gpu_gemm_pd_t;
@@ -45,6 +48,7 @@ struct gen_gemm_t : public gpu_gemm_t {
             using namespace data_type;
             using namespace primitive_kind;
             using smask_t = primitive_attr_t::skip_mask_t;
+            using arch_t = compute::gpu_arch_t;
 
             assert(engine->kind() == engine_kind::gpu);
             auto *compute_engine
@@ -52,7 +56,8 @@ struct gen_gemm_t : public gpu_gemm_t {
 
             // LIMITATIONS:
             // - runtime dims are not supported
-            // - bias is not supported
+            // - bias only supported for f16 and f32 with same c_type.
+            // - postops only supported for f32.
             bool ok = true;
 
             auto attr_skip_mask = smask_t::oscale | smask_t::post_ops;
@@ -85,16 +90,27 @@ struct gen_gemm_t : public gpu_gemm_t {
                         && d->acc_type == d->c_type();
             }
 
-            ok = ok
+            ok = ok && !has_blocks() && batch_dims() <= 2
                     && !utils::one_of(DNNL_RUNTIME_DIM_VAL, d->m(), d->n(),
                             d->k(), d->lda(), d->ldb(), d->ldc(), d->batch())
-                    && d->bias_type() == data_type::undef
+                    && IMPLICATION(with_bias(),
+                            (d->bias_type() == d->c_type())
+                                    && utils::one_of(
+                                            d->bias_type(), f32, bf16, f16)
+                                    && utils::one_of(
+                                            bias_cmask(), 0, 1 << 0, 1 << 1))
                     && compute_engine->mayiuse_ngen_kernels()
                     && attr()->has_default_values(attr_skip_mask)
-                    && attr()->output_scales_.mask_ == 0
-                    && attr()->post_ops_.len() <= 1
-                    && IMPLICATION(attr()->post_ops_.len() == 1,
-                            attr()->post_ops_.find(sum) != -1);
+                    && attr()->output_scales_.mask_ == 0;
+
+            // check if there is sum post op and only at first place
+            ok &= IMPLICATION(attr()->post_ops_.find(sum) != -1,
+                    attr()->post_ops_.find(sum) == 0
+                            && attr()->post_ops_.find(sum, 1) == -1);
+
+            // check if post ops are supported
+            ok &= IMPLICATION(attr()->post_ops_.len() > 0,
+                    jit_post_op_injector_is_supported(attr()->post_ops_, true));
 
             if (!ok) return status::unimplemented;
 
@@ -102,15 +118,14 @@ struct gen_gemm_t : public gpu_gemm_t {
 
             arch_ = dev_info->gpu_arch();
 
-            ok &= utils::one_of(arch_, compute::gpu_arch_t::gen9,
-                    compute::gpu_arch_t::gen12lp);
+            ok &= utils::one_of(arch_, arch_t::gen9, arch_t::xe_lp);
 
             if (!ok) return status::unimplemented;
 
             eu_count_ = dev_info->eu_count();
             hw_threads_ = dev_info->hw_threads();
 
-            attr_info_ = attr_info_t::create(attr());
+            if (!ok) return status::unimplemented;
 
             return status::success;
         }
@@ -123,20 +138,25 @@ struct gen_gemm_t : public gpu_gemm_t {
             return !attr()->zero_points_.has_default_values(DNNL_ARG_DST);
         }
 
-        bool with_eltwise() const { return false; }
-
-        float eltwise_alpha() const { return 1.0f; }
-
-        float eltwise_beta() const { return 0.0f; }
-
-        float eltwise_scale() const { return 1.0f; }
-
         float alpha() const { return attr()->output_scales_.scales_[0]; }
 
         float beta() const {
             using namespace primitive_kind;
             const auto &p = attr()->post_ops_;
             return p.contain(sum, 0) ? p.entry_[0].sum.scale : 0.f;
+        }
+
+        bool with_bias() const {
+            return desc()->bias_type() != data_type::undef;
+        }
+
+        int bias_cmask() const {
+            unsigned char to_cmask[4] = {0, 2, 1, 3};
+            return with_bias() ? to_cmask[(desc()->bias_mask() >> 1) & 3] : -1;
+        }
+
+        int batch_dims() const {
+            return nstl::max(desc()->c_desc.ndims - 2, 0);
         }
 
         size_t dyn_offset_a = 0;
@@ -146,11 +166,7 @@ struct gen_gemm_t : public gpu_gemm_t {
         int hw_threads_ = 0;
         int eu_count_ = 0;
         compute::gpu_arch_t arch_ = compute::gpu_arch_t::unknown;
-
-        attr_info_t attr_info_ = {};
     };
-
-    gen_gemm_t(const pd_t *apd) : gpu_gemm_t(apd) {}
 
     status_t init(engine_t *engine) override { return init_nocopy(engine); }
 
@@ -159,7 +175,7 @@ struct gen_gemm_t : public gpu_gemm_t {
 
         int unroll_m, unroll_n;
         auto batch = pd()->desc()->batch();
-        bool batched = (batch > 1);
+        int batch_dims = pd()->batch_dims();
         bool transa = (pd()->desc()->transa() == dnnl_trans);
         bool transb = (pd()->desc()->transb() == dnnl_trans);
         auto a_type = pd()->desc()->a_type();
@@ -172,8 +188,9 @@ struct gen_gemm_t : public gpu_gemm_t {
 
         kernel_t kernel;
 
-        auto status = kernel.init(pd()->arch_, batched, transa, transb,
-                pd()->with_c_offset(), a_type, b_type, c_type, unroll_m,
+        auto status = kernel.init(pd()->arch_, batch_dims, transa, transb,
+                pd()->with_c_offset(), pd()->with_bias(),
+                pd()->attr()->post_ops_, a_type, b_type, c_type, unroll_m,
                 unroll_n);
         if (status != status::success) return status;
 
@@ -194,9 +211,7 @@ private:
             int64_t offset_c, int32_t offset_co, int32_t lda, int32_t ldb,
             int32_t ldc, int32_t m, int32_t n, int32_t k, float alpha,
             float beta, int16_t ao, int16_t bo, int32_t cmask,
-            bool last_k_block, float eltwise_alpha, float eltwise_beta,
-            float eltwise_scale, int32_t batch, int32_t stride_a,
-            int32_t stride_b, int32_t stride_c) const;
+            bool last_k_block) const;
 
     compute::kernel_t nocopy_kernel_;
     CommonDriverInfo nocopy_info_;

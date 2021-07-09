@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2018-2020 Intel Corporation
+* Copyright 2018-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -47,7 +47,7 @@ static bool check_dims_contiguous_except_one(const memory_desc_wrapper &mdw,
     dim_t expect_stride = 1;
     for (int idx = mdw.ndims() - 1; idx >= 0; --idx) {
         const int permuted_idx = *(perm.begin() + idx);
-        bool ok = (idx == idx_with_arbitrary_stride)
+        const bool ok = (idx == idx_with_arbitrary_stride)
                 ? expect_stride <= blk.strides[permuted_idx]
                 : expect_stride == blk.strides[permuted_idx];
         if (!ok) return false;
@@ -79,6 +79,12 @@ bool rnn_utils::is_ldigo_blocked(const memory_desc_wrapper &mdw) {
     return md_format_tag != format_tag::undef;
 }
 
+bool rnn_utils::is_ldgoi_blocked(const memory_desc_wrapper &mdw) {
+    format_tag_t md_format_tag = mdw.matches_one_of_tag(
+            format_tag::ldgIo32i, format_tag::ldgIO32i2o);
+    return md_format_tag != format_tag::undef;
+}
+
 bool rnn_utils::is_ldio_blocked(const memory_desc_wrapper &mdw) {
     format_tag_t md_format_tag = mdw.matches_one_of_tag(
             format_tag::ldOi32o, format_tag::ldOI32o4i);
@@ -88,7 +94,7 @@ bool rnn_utils::is_ldio_blocked(const memory_desc_wrapper &mdw) {
 int rnn_utils::get_good_ld(int dim, int sizeof_dt) {
     // we want matrices leading dimentions to be 64-byte aligned,
     // and not divisible by 256 to avoid 4K aliasing effects
-    int ld = rnd_up(dim, 64 / sizeof_dt);
+    const int ld = rnd_up(dim, 64 / sizeof_dt);
     return (ld % 256 == 0) ? ld + 64 / sizeof_dt : ld;
 }
 
@@ -169,7 +175,7 @@ void rnn_utils::get_scratchpad_and_workspace_sizes(const rnn_conf_t &rnn,
 status_t rnn_utils::set_good_strides(
         memory_desc_t &weights_md, format_tag_t tag) {
     auto &strides = weights_md.format_desc.blocking.strides;
-    auto dims = weights_md.dims;
+    const auto dims = weights_md.dims;
 
     int ld_dim_idx = 0;
     switch (tag) {
@@ -262,28 +268,39 @@ status_t rnn_utils::set_expected_desc(rnn_conf_t &rnn,
         using namespace format_tag;
         if (rnn.is_brgemm) {
             format_tag_t tag = format_tag::undef;
-            tag = (weights_type == weights_type_t::projection)
-                    ? (rnn.is_int8()) ? format_tag::ldOI32o4i
-                                      : format_tag::ldOi32o
-                    : (rnn.is_int8()) ? format_tag::ldgOI32o4i
-                                      : (rnn.is_bf16()) ? format_tag::ldgOI32o2i
-                                                        : format_tag::ldgOi32o;
+
+            if (weights_type == weights_type_t::projection) {
+                tag = rnn.is_int8() ? format_tag::ldOI32o4i
+                                    : format_tag::ldOi32o;
+            } else if (rnn.is_fwd) {
+                tag = rnn.is_int8() ? format_tag::ldgOI32o4i
+                                    : rnn.is_bf16() ? format_tag::ldgOI32o2i
+                                                    : format_tag::ldgOi32o;
+            } else {
+                tag = rnn.is_bf16() ? format_tag::ldgIO32i2o
+                                    : format_tag::ldgIo32i;
+            }
+
             if (tag != format_tag::undef) {
                 CHECK(memory_desc_init_by_tag(weights_md, tag));
-                if (rnn.is_int8()) {
+                if (rnn.is_unsigned_int8()) {
                     weights_md.extra.flags
                             = 0 | memory_extra_flags::rnn_u8s8_compensation;
                     weights_md.extra.compensation_mask
                             = (weights_type == weights_type_t::projection)
                             ? 13 // 1101
                             : 27; // 11011
+                } else if (rnn.is_signed_int8()) {
+                    weights_md.extra.flags
+                            = 0 | memory_extra_flags::rnn_s8s8_compensation;
+                    weights_md.extra.compensation_mask = 0;
                 }
                 return status::success;
             } else {
                 return status::unimplemented;
             }
         } else {
-            format_tag_t tag = weights_type == weights_type_t::projection
+            const format_tag_t tag = weights_type == weights_type_t::projection
                     ? rnn.is_fwd ? ldio : ldoi
                     : rnn.is_fwd ? ldigo : ldgoi;
             CHECK(memory_desc_init_by_tag(weights_md, tag));

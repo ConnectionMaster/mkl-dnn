@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -45,7 +45,7 @@ private:
     constexpr static int isa_simd_width_
             = cpu_isa_traits<avx512_core>::vlen / sizeof(float);
     const int ic_sub_step = 4;
-    std::unique_ptr<injector::jit_uni_postops_injector_t<avx512_core>>
+    std::unique_ptr<injector::jit_uni_postops_injector_t<avx512_core, Vmm>>
             postops_injector_;
 
     enum {
@@ -68,6 +68,7 @@ private:
     const Xbyak::Reg64 reg_out = r10;
     const Xbyak::Reg64 aux_reg_inp = r11;
     const Xbyak::Reg64 reg_ptr_sum_scale = r11;
+    const Xbyak::Reg64 reg_ptr_sum_zp = abi_not_param1;
     const Xbyak::Reg64 aux_reg_ker = r12;
     const Xbyak::Reg64 reg_compensation = r14;
     const Xbyak::Reg64 aux_reg_inp_d = r13;
@@ -106,6 +107,7 @@ private:
     const Vmm vmm_prev_dst = Vmm(31);
     /* used during write-out section of store_output */
     const Vmm vmm_saturation = Vmm(30);
+    const Vmm vmm_sum_zp = Vmm(30);
     const Vmm vmm_zero = Vmm(31);
 
     /* used in compute_ker (but set during prepare_output) */
@@ -184,9 +186,11 @@ private:
 
     void prepare_output(int ur_w);
     void apply_sum(int ur_w, bool last_oc_block_flag, const int nb_oc_block,
-            const int oc_block, const float *p_sum_scale);
+            const int oc_block, const float *p_sum_scale,
+            const int32_t *p_sum_zp);
     void apply_postops(int ur_w, bool last_oc_block_flag, const int nb_oc_block,
-            const int oc_block, const float *p_sum_scale);
+            const int oc_block, const float *p_sum_scale,
+            const int32_t *p_sum_zp);
     void store_output(int ur_w, bool last_oc_block_flag);
     void compute_ker_dw(int ur_w, int pad_l, int pad_r,
             ic_block_t last_ic_block_flag, bool h_padded);
@@ -230,7 +234,7 @@ struct jit_avx512_core_x8s8s32x_fwd_kernel {
     static status_t init_conf(jit_conv_conf_t &jcp,
             const convolution_desc_t &cd, memory_desc_t &src_pd,
             memory_desc_t &weights_pd, memory_desc_t &dst_pd,
-            memory_desc_t &bias_pd, const primitive_attr_t &attr, int nthreads);
+            memory_desc_t &bias_pd, primitive_attr_t &attr, int nthreads);
     static void init_scratchpad(memory_tracking::registrar_t &scratchpad,
             const jit_conv_conf_t &jcp, const primitive_attr_t &attr);
     void operator()(const jit_conv_call_s *p) const { (*kernel_)(p); }

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 * Copyright 2020 Codeplay Software Limited
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
@@ -36,21 +36,6 @@ struct cudnn_reorder_t : public primitive_t {
     struct pd_t : public reorder_pd_t {
         using reorder_pd_t::reorder_pd_t;
         DECLARE_COMMON_PD_T("cuda:cudnn:any", cudnn_reorder_t);
-
-        static status_t create(reorder_pd_t **reorder_pd, engine_t *engine,
-                const primitive_attr_t *attr, engine_t *src_engine,
-                const memory_desc_t *src_md, engine_t *dst_engine,
-                const memory_desc_t *dst_md) {
-            auto _pd = new pd_t(attr, src_engine->kind(), src_md,
-                    dst_engine->kind(), dst_md);
-            if (_pd == nullptr) return status::out_of_memory;
-            if (_pd->init(engine, src_engine, dst_engine) != status::success) {
-                delete _pd;
-                return status::unimplemented;
-            }
-            _pd->init_scratchpad_md();
-            return safe_ptr_assign<reorder_pd_t>(*reorder_pd, _pd);
-        }
 
         // Function to verify data and memory format
         bool valid_data_n_mem_format() const {
@@ -104,9 +89,24 @@ struct cudnn_reorder_t : public primitive_t {
             return reorder_->init(this);
         }
         std::shared_ptr<cudnn_reorder_generic_t> reorder_;
-    };
 
-    cudnn_reorder_t(const pd_t *apd) : primitive_t(apd) {}
+    private:
+        static status_t create(reorder_pd_t **reorder_pd, engine_t *engine,
+                const primitive_attr_t *attr, engine_t *src_engine,
+                const memory_desc_t *src_md, engine_t *dst_engine,
+                const memory_desc_t *dst_md) {
+            auto _pd = new pd_t(attr, src_engine->kind(), src_md,
+                    dst_engine->kind(), dst_md);
+            if (_pd == nullptr) return status::out_of_memory;
+            if (_pd->init(engine, src_engine, dst_engine) != status::success) {
+                delete _pd;
+                return status::unimplemented;
+            }
+            _pd->init_scratchpad_md();
+            return safe_ptr_assign<reorder_pd_t>(*reorder_pd, _pd);
+        }
+        friend dnnl::impl::impl_list_item_t;
+    };
 
     status_t execute(const exec_ctx_t &ctx) const override;
 

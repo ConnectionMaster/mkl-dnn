@@ -29,7 +29,7 @@
 #include "cpu/x64/cpu_barrier.hpp"
 #include "cpu/x64/cpu_reducer.hpp"
 #include "cpu/x64/jit_avx512_core_amx_conv_kernel.hpp"
-#include "cpu/x64/jit_transpose_src_utils.hpp"
+#include "cpu/x64/jit_transpose_utils.hpp"
 
 namespace dnnl {
 namespace impl {
@@ -48,42 +48,37 @@ struct jit_avx512_core_amx_convolution_fwd_t : public primitive_t {
                 jit_avx512_core_amx_convolution_fwd_t);
 
         status_t init(engine_t *engine) {
+            using namespace data_type;
             using smask_t = primitive_attr_t::skip_mask_t;
-            bool is_bf16_convolution = true
-                    && (src_md_.data_type == data_type::bf16
-                            && weights_md_.data_type == data_type::bf16
-                            && utils::one_of(dst_md_.data_type, data_type::f32,
-                                    data_type::bf16))
+            bool is_bf16_convolution
+                    = (src_md_.data_type == bf16
+                              && weights_md_.data_type == bf16
+                              && utils::one_of(dst_md_.data_type, f32, bf16))
                     && IMPLICATION(with_bias(),
-                            utils::one_of(bias_md_.data_type, data_type::f32,
-                                    data_type::bf16))
+                            utils::one_of(bias_md_.data_type, f32, bf16))
                     && attr()->has_default_values(smask_t::post_ops);
-            bool is_int8_convolution = true
-                    && expect_data_types(src_type, data_type::s8,
-                            data_type::undef, dst_type, data_type::s32)
+            bool is_int8_convolution = expect_data_types(src_type, s8,
+                                               data_type::undef, dst_type, s32)
                     && IMPLICATION(with_bias(),
-                            utils::one_of(bias_md_.data_type, data_type::f32,
-                                    data_type::s32, data_type::s8,
-                                    data_type::u8))
+                            utils::one_of(bias_md_.data_type, f32, s32, s8, u8))
                     && attr()->has_default_values(smask_t::oscale
                             | smask_t::post_ops | smask_t::zero_points_runtime);
 
-            bool ok = true && is_fwd()
+            bool ok = is_fwd()
                     && set_default_alg_kind(alg_kind::convolution_direct)
                     && (is_bf16_convolution || is_int8_convolution)
                     && !has_zero_dim_memory() && zero_points_ok();
             if (!ok) return status::unimplemented;
 
-            status_t status = jit_avx512_core_amx_fwd_kernel_t::init_conf(jcp_,
-                    *desc(), src_md_, weights_md_, dst_md_, bias_md_, *attr(),
-                    dnnl_get_max_threads());
-            if (status != status::success) return status;
+            CHECK(jit_avx512_core_amx_fwd_kernel_t::init_conf(jcp_, *desc(),
+                    src_md_, weights_md_, dst_md_, bias_md_, attr_,
+                    dnnl_get_max_threads()));
 
             auto scratchpad = scratchpad_registry().registrar();
-            jit_avx512_core_amx_fwd_kernel_t::init_scratchpad(
-                    scratchpad, jcp_, *attr());
+            CHECK(jit_avx512_core_amx_fwd_kernel_t::init_scratchpad(
+                    scratchpad, jcp_, *attr()));
 
-            return status;
+            return status::success;
         }
 
         jit_conv_conf_t jcp_;
@@ -111,7 +106,7 @@ struct jit_avx512_core_amx_convolution_fwd_t : public primitive_t {
     status_t init(engine_t *engine) override {
         CHECK(safe_ptr_assign(kernel_,
                 new jit_avx512_core_amx_fwd_kernel_t(
-                        pd()->jcp_, *pd()->attr())));
+                        pd()->jcp_, *pd()->attr(), *pd()->dst_md(0))));
         return kernel_->create_kernel();
     }
 
@@ -160,7 +155,7 @@ struct jit_avx512_core_amx_convolution_bwd_data_t : public primitive_t {
 
             status_t status = jit_avx512_core_amx_bwd_data_kernel_t::init_conf(
                     jcp_, *desc(), diff_src_md_, weights_md_, diff_dst_md_,
-                    nullptr /* no bias */, *attr(), dnnl_get_max_threads());
+                    nullptr /* no bias */, attr_, dnnl_get_max_threads());
             if (status != status::success) return status;
 
             auto scratchpad = scratchpad_registry().registrar();
@@ -288,8 +283,30 @@ private:
 
     std::unique_ptr<cpu_accumulator_1d_t<data_type::f32>> acc_ker_;
 
+    std::unique_ptr<jit_diff_wei_trans_to_vnni_t> diff_wei_trans_kernel_;
     std::unique_ptr<jit_trans_src_t> trans_kernel_;
     std::unique_ptr<jit_trans_dst_t> trans_dst_kernel_;
+
+    inline dim_t wei_offset_int(int g, int oc_b, int ic_b, int kX) const {
+        const auto &jcp = kernel_->jcp;
+        const dim_t const_extra_offset = jcp.kw * jcp.ic_block * jcp.oc_block;
+        dim_t extra_offset = (jcp.ndims == 5) ? kX * jcp.kh * const_extra_offset
+                                              : kX * const_extra_offset;
+        return (dim_t)((g * jcp.nb_oc + oc_b) * jcp.nb_ic + ic_b) * jcp.kd
+                * jcp.kh * jcp.kw * jcp.ic_block * jcp.oc_block
+                + extra_offset;
+    }
+    inline dim_t wei_offset_ext(int g, int oc_b, int ic_b, int kX) const {
+        const auto &jcp = kernel_->jcp;
+        const int nb_ic = utils::div_up(jcp.ic, 2 * jcp.ic_block);
+        const dim_t const_extra_offset
+                = jcp.kw * jcp.ic_block * jcp.oc_block * 2;
+        dim_t extra_offset = (jcp.ndims == 5) ? kX * jcp.kh * const_extra_offset
+                                              : kX * const_extra_offset;
+        return (dim_t)((g * jcp.nb_oc + oc_b) * nb_ic + ic_b) * jcp.kd * jcp.kh
+                * jcp.kw * jcp.ic_block * jcp.oc_block * 2
+                + extra_offset;
+    }
 };
 
 } // namespace x64

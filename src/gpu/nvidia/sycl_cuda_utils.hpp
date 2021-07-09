@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 * Copyright 2020 Codeplay Software Limited
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
@@ -28,6 +28,8 @@
 #include "common/engine.hpp"
 #include "common/z_magic.hpp"
 
+#include <CL/sycl/backend/cuda.hpp>
+
 namespace dnnl {
 namespace impl {
 namespace gpu {
@@ -50,6 +52,9 @@ namespace nvidia {
             ctx.get_scratchpad_grantor().get_memory_storage(arg).get()) \
             ->buffer() \
             .get_access<cl::sycl::access::mode::read_write>(cgh)
+
+bool compare_cuda_devices(
+        const cl::sycl::device &lhs, const cl::sycl::device &rhs);
 
 // Check if the device type matches the passed engine kind
 inline status_t check_device(dnnl::impl::engine_kind_t eng_kind) {
@@ -369,7 +374,7 @@ static status_t cublas_to_dnnl_status(cublasStatus_t cu_status) {
 
 static status_t cuda_to_dnnl_status(CUresult cu_result) {
     switch (cu_result) {
-        case CUDNN_STATUS_SUCCESS: return status::success;
+        case CUDA_SUCCESS: return status::success;
         default: return status::runtime_error;
     }
 }

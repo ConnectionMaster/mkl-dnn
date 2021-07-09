@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -33,6 +33,7 @@ namespace gpu {
 namespace ocl {
 
 struct ref_reduction_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_reduction_pd_t {
         using gpu_reduction_pd_t::gpu_reduction_pd_t;
 
@@ -44,7 +45,8 @@ struct ref_reduction_t : public gpu_primitive_t {
 
             const bool ok = set_default_params() == status::success
                     && attr()->has_default_values(attr_skip_mask)
-                    && post_ops_with_binary_ok(attr(), dst_md()->data_type, 5);
+                    && post_ops_with_binary_ok(attr(), dst_md()->data_type, 5)
+                    && attr_.set_default_formats(dst_md(0)) == status::success;
             if (!ok) return status::unimplemented;
 
             return init_conf(engine);
@@ -55,8 +57,6 @@ struct ref_reduction_t : public gpu_primitive_t {
 
         reduction_conf_t conf;
     };
-
-    ref_reduction_t(const pd_t *apd) : gpu_primitive_t(apd) {}
 
     status_t init(engine_t *engine) override {
         compute::kernel_ctx_t kernel_ctx;

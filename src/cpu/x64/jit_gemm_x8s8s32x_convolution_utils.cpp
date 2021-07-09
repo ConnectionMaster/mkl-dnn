@@ -126,8 +126,8 @@ private:
     const Xbyak::Zmm vreg_saturation_ubound_;
     const Xbyak::Zmm vreg_zp_dst_common_;
 
-    const Xbyak::Opmask &kreg_rem_mask_short_ = k1;
-    const Xbyak::Opmask &kreg_rem_mask_vlen_ = k3;
+    const Xbyak::Opmask &kreg_rem_mask_short_ = k3;
+    const Xbyak::Opmask &kreg_rem_mask_vlen_ = k4;
 
     static constexpr size_t def_unroll_ = 4u;
     size_t zmm_step_;
@@ -225,7 +225,8 @@ void jit_pp_ker_t::operator()(void *void_dst, const acc_data_t *acc,
     const ptrdiff_t g_oc_offset_prologue = g_oc_offset + oc_offset;
     args.bias = bias + g_oc_offset_prologue * bias_data_type_size_;
     args.zp_src = zp.src + (jcp_.zp.src_is_common ? 0 : g_oc_offset_prologue);
-    args.zp_src_comp = zp.src_comp + g_oc_offset_prologue;
+    args.zp_src_comp
+            = zp.src_comp ? zp.src_comp + g_oc_offset_prologue : nullptr;
     args.zp_dst = zp.dst;
     args.scales = scales + jcp_.scale_idx_mult * g_oc_offset_prologue;
     args.sum_scale = sum_scale;

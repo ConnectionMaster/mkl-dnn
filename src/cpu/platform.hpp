@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 * Copyright 2020 Arm Ltd. and affiliates
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
@@ -97,7 +97,7 @@ dnnl_cpu_isa_hints_t get_cpu_isa_hints();
 
 bool DNNL_API prefer_ymm_requested();
 bool DNNL_API has_data_type_support(data_type_t data_type);
-float s8s8_weights_scale_factor();
+float DNNL_API s8s8_weights_scale_factor();
 
 unsigned get_per_core_cache_size(int level);
 unsigned get_num_cores();
@@ -110,6 +110,8 @@ constexpr int get_cache_line_size() {
 }
 
 int get_vector_register_size();
+
+size_t get_timestamp();
 
 } // namespace platform
 

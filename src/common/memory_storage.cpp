@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -15,8 +15,8 @@
 *******************************************************************************/
 
 #include "common/memory_storage.hpp"
+#include "common/engine.hpp"
 #include "common/memory.hpp"
-#include "common/stream.hpp"
 
 #include <assert.h>
 
@@ -35,21 +35,22 @@ status_t memory_storage_t::init(unsigned flags, size_t size, void *handle) {
     return set_data_handle(handle);
 }
 
-status_t memory_storage_t::map_data(
-        void **mapped_ptr, stream_t *stream, size_t size) const {
-    UNUSED(size);
-    if (stream != nullptr && stream->engine() != engine_)
-        return status::invalid_arguments;
-    return get_data_handle(mapped_ptr);
+memory_storage_t::memory_storage_t(
+        engine_t *engine, const memory_storage_t *parent_storage)
+    : parent_storage_(parent_storage) {
+    engine_ = engine;
+#ifdef DNNL_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
+    if (engine_) engine_->retain();
+#endif
 }
 
-status_t memory_storage_t::unmap_data(
-        void *mapped_ptr, stream_t *stream) const {
-    UNUSED(mapped_ptr);
-    if (stream != nullptr && stream->engine() != engine_)
-        return status::invalid_arguments;
-    return status::success;
-}
+#ifdef DNNL_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
+memory_storage_t::~memory_storage_t() {
+    if (engine_) engine_->release();
+};
+#else
+memory_storage_t::~memory_storage_t() = default;
+#endif
 
 } // namespace impl
 } // namespace dnnl

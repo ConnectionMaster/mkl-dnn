@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 * Copyright 2020 Codeplay Software Limited
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
@@ -35,6 +35,7 @@ namespace gpu {
 namespace nvidia {
 
 struct cudnn_binary_t : public primitive_t {
+    using primitive_t::primitive_t;
 
     struct pd_t : public binary_pd_t {
         using binary_pd_t::binary_pd_t;
@@ -46,12 +47,8 @@ struct cudnn_binary_t : public primitive_t {
 
             bool ok = (set_default_params() == status::success)
                     && check_data_types() && check_no_blocking()
-                    && IMPLICATION(
-                            utils::one_of(src_md(0)->data_type, f32, f16),
-                            attr()->has_default_values())
-                    && IMPLICATION(utils::one_of(src_md(0)->data_type, s8),
-                            attr()->has_default_values(
-                                    primitive_attr_t::skip_mask_t::scales))
+                    && attr()->has_default_values(
+                            primitive_attr_t::skip_mask_t::scales)
                     && IMPLICATION(!attr()->scales_.has_default_values(),
                             check_scales_mask());
 
@@ -103,13 +100,12 @@ struct cudnn_binary_t : public primitive_t {
                 case s8:
                     return inputs_same
                             && (input_type == f32 || input_type == s8);
+                default: return false;
             }
             return false;
         }
         std::shared_ptr<cudnn_binary_impl_base_t> binary_impl_;
     };
-
-    cudnn_binary_t(const pd_t *apd) : primitive_t(apd) {}
 
     status_t execute(const exec_ctx_t &ctx) const override;
 

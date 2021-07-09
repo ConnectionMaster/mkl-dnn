@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -20,12 +20,13 @@
 #include <limits.h>
 
 #include "common/bit_cast.hpp"
+#include "common/compiler_workarounds.hpp"
 #include "common/type_helpers.hpp"
 #include "common/utils.hpp"
 
 #include "cpu/x64/cpu_isa_traits.hpp"
 
-#include "cpu/x64/jit_utils/jit_utils.hpp"
+#include "cpu/jit_utils/jit_utils.hpp"
 
 #if defined(_WIN32) && !defined(__GNUC__)
 #define STRUCT_ALIGN(al, ...) __declspec(align(al)) __VA_ARGS__
@@ -35,6 +36,12 @@
 
 #if defined(_WIN32)
 #define OFFSET_SHADOWSPACE 0x28
+#endif
+
+#if GCC_WA_NO_TREE_DOMINATOR_OPTS
+#define ATTRIBUTE_OPTIMIZE __attribute__((optimize("no-tree-dominator-opts")))
+#else
+#define ATTRIBUTE_OPTIMIZE
 #endif
 
 #define DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_name) \
@@ -375,6 +382,25 @@ public:
         vmovsd(x, addr);
     }
 
+    void uni_vmovlps(const Xbyak::Address &addr, const Xbyak::Xmm &x) {
+        if (is_valid_isa(avx))
+            vmovlps(addr, x);
+        else
+            movlps(addr, x);
+    }
+    void uni_vmovlps(const Xbyak::Address &addr, const Xbyak::Ymm &x) {
+        vmovlps(addr, x);
+    }
+    void uni_vmovlps(const Xbyak::Xmm &x, const Xbyak::Address &addr) {
+        if (is_valid_isa(avx))
+            vmovlps(x, addr);
+        else
+            movlps(x, addr);
+    }
+    void uni_vmovlps(const Xbyak::Ymm &x, const Xbyak::Address &addr) {
+        vmovlps(x, addr);
+    }
+
     void uni_vmovdqu(const Xbyak::Address &addr, const Xbyak::Xmm &x) {
         if (is_valid_isa(avx))
             vmovdqu(addr, x);
@@ -440,10 +466,10 @@ public:
     }
 
     void uni_vmovntps(const Xbyak::Address &addr, const Xbyak::Xmm &x) {
-        movntps(addr, x);
-    }
-    void uni_vmovntps(const Xbyak::Address &addr, const Xbyak::Ymm &x) {
-        vmovntps(addr, x);
+        if (is_valid_isa(avx))
+            vmovntps(addr, x);
+        else
+            movntps(addr, x);
     }
 
     void uni_vbroadcastss(const Xbyak::Xmm &x, const Xbyak::Operand &op) {
@@ -523,12 +549,26 @@ public:
 
     void uni_vdivps(const Xbyak::Xmm &x, const Xbyak::Operand &op1,
             const Xbyak::Operand &op2) {
-        assert(x.isEqualIfNotInherited(op1));
-        divps(x, op2);
+        if (is_valid_isa(avx))
+            vdivps(x, op1, op2);
+        else {
+            assert(x.isEqualIfNotInherited(op1));
+            divps(x, op2);
+        }
     }
     void uni_vdivps(const Xbyak::Ymm &x, const Xbyak::Operand &op1,
             const Xbyak::Operand &op2) {
         vdivps(x, op1, op2);
+    }
+
+    void uni_vdivss(const Xbyak::Xmm &x, const Xbyak::Operand &op1,
+            const Xbyak::Operand &op2) {
+        if (is_valid_isa(avx))
+            vdivss(x, op1, op2);
+        else {
+            assert(x.isEqualIfNotInherited(op1));
+            divss(x, op2);
+        }
     }
 
     void uni_vdivps(const Xbyak::Xmm &x, const Xbyak::Operand &op1,
@@ -568,6 +608,26 @@ public:
     void uni_vaddss(const Xbyak::Ymm &x, const Xbyak::Operand &op1,
             const Xbyak::Operand &op2) {
         vaddss(x, op1, op2);
+    }
+
+    void uni_vphaddd(const Xbyak::Xmm &x, const Xbyak::Xmm &x2,
+            const Xbyak::Operand &op) {
+        if (is_valid_isa(avx)) {
+            vphaddd(x, x2, op);
+        } else {
+            assert(x.isEqualIfNotInherited(op));
+            phaddd(x, op);
+        }
+    }
+
+    void uni_vhaddps(const Xbyak::Xmm &x, const Xbyak::Xmm &x2,
+            const Xbyak::Operand &op) {
+        if (is_valid_isa(avx)) {
+            vhaddps(x, x2, op);
+        } else {
+            assert(x.isEqualIfNotInherited(op));
+            haddps(x, op);
+        }
     }
 
     void uni_vpsignd(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
@@ -612,8 +672,12 @@ public:
 
     void uni_vsubps(const Xbyak::Xmm &x, const Xbyak::Operand &op1,
             const Xbyak::Operand &op2) {
-        assert(x.isEqualIfNotInherited(op1));
-        subps(x, op2);
+        if (is_valid_isa(avx))
+            vsubps(x, op1, op2);
+        else {
+            assert(x.isEqualIfNotInherited(op1));
+            subps(x, op2);
+        }
     }
     void uni_vsubps(const Xbyak::Ymm &x, const Xbyak::Operand &op1,
             const Xbyak::Operand &op2) {
@@ -765,9 +829,16 @@ public:
             const Xbyak::Operand &op) {
         // Note: x2 gets overriden by x2*op
         // This is incorrect if x1 == x2
-        assert(x1.getIdx() != x2.getIdx());
-        mulss(x2, op);
-        addss(x1, x2);
+        if (is_valid_isa(avx2))
+            vfmadd231ss(x1, x2, op);
+        else if (is_valid_isa(avx)) {
+            vmulss(x2, x2, op);
+            vaddss(x1, x1, x2);
+        } else {
+            assert(x1.getIdx() != x2.getIdx());
+            mulss(x2, op);
+            addss(x1, x2);
+        }
     }
     void uni_vfmadd231ss(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
             const Xbyak::Operand &op) {
@@ -786,9 +857,16 @@ public:
             const Xbyak::Operand &op) {
         // Note: x2 gets overriden by x2*op
         // This is incorrect if x1 == x2
-        assert(x1.getIdx() != x2.getIdx());
-        mulps(x2, op);
-        subps(x1, x2);
+        if (is_valid_isa(avx2))
+            vfnmadd231ps(x1, x2, op);
+        else if (is_valid_isa(avx)) {
+            vmulps(x2, x2, op);
+            vsubps(x1, x1, x2);
+        } else {
+            assert(x1.getIdx() != x2.getIdx());
+            mulps(x2, op);
+            subps(x1, x2);
+        }
     }
 
     void uni_vfnmadd231ps(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
@@ -801,6 +879,35 @@ public:
             assert(x1.getIdx() != x2.getIdx());
             vmulps(x2, x2, op);
             vsubps(x1, x1, x2);
+        }
+    }
+
+    void uni_vfnmadd231ss(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
+            const Xbyak::Operand &op) {
+        // Note: x2 gets overriden by x2*op
+        // This is incorrect if x1 == x2
+        if (is_valid_isa(avx2))
+            vfnmadd231ss(x1, x2, op);
+        else if (is_valid_isa(avx)) {
+            vmulss(x2, x2, op);
+            vsubss(x1, x1, x2);
+        } else {
+            assert(x1.getIdx() != x2.getIdx());
+            mulss(x2, op);
+            subss(x1, x2);
+        }
+    }
+
+    void uni_vfnmadd231ss(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
+            const Xbyak::Operand &op) {
+        if (is_valid_isa(avx2))
+            vfnmadd231ss(x1, x2, op);
+        else {
+            // Note: x2 gets overriden by x2*op
+            // This is incorrect if x1 == x2
+            assert(x1.getIdx() != x2.getIdx());
+            vmulss(x2, x2, op);
+            vsubss(x1, x1, x2);
         }
     }
 
@@ -965,6 +1072,16 @@ public:
         vmaxps(x, op1, op2);
     }
 
+    void uni_vmaxss(const Xbyak::Xmm &x, const Xbyak::Operand &op1,
+            const Xbyak::Operand &op2) {
+        if (is_valid_isa(avx))
+            vmaxss(x, op1, op2);
+        else {
+            if (!x.isEqualIfNotInherited(op1)) movss(x, op1);
+            maxss(x, op2);
+        }
+    }
+
     void uni_vminps(const Xbyak::Xmm &x, const Xbyak::Operand &op1,
             const Xbyak::Operand &op2) {
 
@@ -979,6 +1096,17 @@ public:
     void uni_vminps(const Xbyak::Ymm &x, const Xbyak::Operand &op1,
             const Xbyak::Operand &op2) {
         vminps(x, op1, op2);
+    }
+
+    void uni_vminss(const Xbyak::Xmm &x, const Xbyak::Operand &op1,
+            const Xbyak::Operand &op2) {
+
+        if (is_valid_isa(avx))
+            vminss(x, op1, op2);
+        else {
+            if (!x.isEqualIfNotInherited(op1)) movss(x, op1);
+            minss(x, op2);
+        }
     }
 
     void uni_vpmovsxbd(const Xbyak::Xmm &x, const Xbyak::Operand &op) {
@@ -1033,6 +1161,18 @@ public:
         vblendvps(x1, x2, op, msk);
     }
 
+    void uni_vblendps(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
+            const Xbyak::Operand &op, const int imm) {
+        assert(!x1.isZMM() && !x2.isZMM());
+
+        if (is_valid_isa(avx))
+            vblendps(x1, x2, op, imm);
+        else {
+            assert(x1.getIdx() == x2.getIdx());
+            blendps(x1, op, imm);
+        }
+    }
+
     void uni_vroundps(
             const Xbyak::Xmm &x, const Xbyak::Operand &op, const int imm) {
         roundps(x, op, imm);
@@ -1047,15 +1187,29 @@ public:
     }
 
     void uni_vcvtps2dq(const Xbyak::Xmm &x, const Xbyak::Operand &op) {
-        cvtps2dq(x, op);
+        if (is_valid_isa(avx))
+            vcvtps2dq(x, op);
+        else
+            cvtps2dq(x, op);
     }
     void uni_vcvtps2dq(const Xbyak::Ymm &x, const Xbyak::Operand &op) {
         vcvtps2dq(x, op);
     }
 
-    void uni_vcvtdq2ps(const Xbyak::Xmm &x, const Xbyak::Operand &op) {
-        cvtdq2ps(x, op);
+    void uni_vcvttps2dq(const Xbyak::Xmm &x, const Xbyak::Operand &op) {
+        if (is_valid_isa(avx))
+            vcvttps2dq(x, op);
+        else
+            cvttps2dq(x, op);
     }
+
+    void uni_vcvtdq2ps(const Xbyak::Xmm &x, const Xbyak::Operand &op) {
+        if (is_valid_isa(avx))
+            vcvtdq2ps(x, op);
+        else
+            cvtdq2ps(x, op);
+    }
+
     void uni_vcvtdq2ps(const Xbyak::Ymm &x, const Xbyak::Operand &op) {
         vcvtdq2ps(x, op);
     }
@@ -1065,6 +1219,26 @@ public:
     }
     void uni_vmovmskps(const Xbyak::Reg &x1, const Xbyak::Ymm &x2) {
         vmovmskps(x1, x2);
+    }
+
+    void uni_vmovd(const Xbyak::Xmm &x, const Xbyak::Reg32 &r) {
+        if (is_valid_isa(avx))
+            vmovd(x, r);
+        else
+            movd(x, r);
+    }
+    void uni_vmovd(const Xbyak::Address &addr, const Xbyak::Xmm &x) {
+        if (is_valid_isa(avx))
+            vmovd(addr, x);
+        else
+            movd(addr, x);
+    }
+
+    void uni_vmovd(const Xbyak::Xmm &x, const Xbyak::Address &addr) {
+        if (is_valid_isa(avx))
+            vmovd(x, addr);
+        else
+            movd(x, addr);
     }
 
     void uni_vmovq(const Xbyak::Xmm &x, const Xbyak::Reg64 &r) {
@@ -1239,6 +1413,31 @@ public:
         vpmaxsd(x1, x2, op);
     }
 
+    void uni_vpmaxsb(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
+            const Xbyak::Operand &op) {
+        if (is_valid_isa(avx))
+            vpmaxsb(x1, x2, op);
+        else {
+            if (x1.getIdx() != x2.getIdx()) movdqa(x1, x2);
+            pmaxsb(x1, op);
+        }
+    }
+
+    void uni_vpmaxsb(const Xbyak::Ymm &x1, const Xbyak::Ymm &x2,
+            const Xbyak::Operand &op) {
+        vpmaxsb(x1, x2, op);
+    }
+
+    void uni_vpminub(const Xbyak::Xmm &x1, const Xbyak::Xmm &x2,
+            const Xbyak::Operand &op) {
+        if (is_valid_isa(avx))
+            vpminub(x1, x2, op);
+        else {
+            if (x1.getIdx() != x2.getIdx()) movdqa(x1, x2);
+            pminub(x1, op);
+        }
+    }
+
     void mul_by_const(
             const Xbyak::Reg &out, const Xbyak::Reg64 &tmp, int value) {
         // Generates a shift + add sequence for multiplicating contents of the
@@ -1342,8 +1541,33 @@ public:
     * memory instructions.
     */
     template <typename Vmm>
+    void load_bytes(
+            const Vmm &vmm, const Xbyak::Address &src_addr, int load_size) {
+        const auto addr = [&](int bytes_offset) {
+            return ptr[src_addr.getRegExp()
+                    + Xbyak::RegExp(bytes_offset * sizeof(int8_t))];
+        };
+
+        load_bytes(vmm, load_size, addr);
+    }
+
+    template <typename Vmm>
     void load_bytes(const Vmm &vmm, const Xbyak::Reg64 &reg, int64_t offset,
             int load_size) {
+
+        // Ensure offset is at most 4 bytes to be encoded in the instruction
+        assert(offset >= INT_MIN && offset <= INT_MAX);
+
+        const auto addr = [&](int bytes_offset) {
+            return ptr[reg + offset + bytes_offset * sizeof(int8_t)];
+        };
+
+        load_bytes(vmm, load_size, addr);
+    }
+
+private:
+    template <typename Vmm, typename AddrFunc>
+    void load_bytes(const Vmm &vmm, int load_size, const AddrFunc &addr) {
 
         constexpr bool is_xmm = std::is_same<Vmm, Xbyak::Xmm>::value;
         constexpr bool is_ymm = std::is_same<Vmm, Xbyak::Ymm>::value;
@@ -1356,9 +1580,6 @@ public:
         // Ensure data fits completely inside the Xmm/Ymm register
         assert(load_size >= 0 && load_size <= 32);
 
-        // Ensure offset is at most 4 bytes to be encoded in the instruction
-        assert(offset >= INT_MIN && offset <= INT_MAX);
-
         // At most 16 bytes can fit inside the Xmm register
         assert(IMPLICATION(load_size > 16, is_ymm));
 
@@ -1370,11 +1591,6 @@ public:
 
         auto xmm = Xbyak::Xmm(vmm.getIdx());
         auto ymm = Xbyak::Ymm(vmm.getIdx());
-
-        // addr(i) denotes the memory pointed by ptr[reg + offset + (i bytes)]
-        const auto addr = [&](int bytes_offset) {
-            return ptr[reg + offset + bytes_offset * sizeof(int8_t)];
-        };
 
         if (load_size == 32) {
             vmovups(ymm, addr(0));
@@ -1466,9 +1682,34 @@ public:
     * past the provided memory buffer so as to minimize the total number of
     * write memory instructions.
     */
+public:
+    template <typename Vmm>
+    void store_bytes(
+            const Vmm &vmm, const Xbyak::Address &dst_addr, int store_size) {
+        const auto addr = [&](int bytes_offset) {
+            return ptr[dst_addr.getRegExp()
+                    + Xbyak::RegExp(bytes_offset * sizeof(int8_t))];
+        };
+        store_bytes(vmm, store_size, addr);
+    }
+
     template <typename Vmm>
     void store_bytes(const Vmm &vmm, const Xbyak::Reg64 &reg, int64_t offset,
             int store_size) {
+
+        // Ensure offset is at most 4 bytes to be encoded in the instruction
+        assert(offset >= INT_MIN && offset <= INT_MAX);
+
+        const auto addr = [&](int bytes_offset) {
+            return ptr[reg + offset + bytes_offset * sizeof(int8_t)];
+        };
+
+        store_bytes(vmm, store_size, addr);
+    }
+
+private:
+    template <typename Vmm, typename AddrFunc>
+    void store_bytes(const Vmm &vmm, int store_size, const AddrFunc &addr) {
 
         constexpr bool is_xmm = std::is_same<Vmm, Xbyak::Xmm>::value;
         constexpr bool is_ymm = std::is_same<Vmm, Xbyak::Ymm>::value;
@@ -1481,9 +1722,6 @@ public:
         // Ensure data fits completely inside the Xmm/Ymm register
         assert(store_size >= 0 && store_size <= 32);
 
-        // Ensure offset is at most 4 bytes to be encoded in the instruction
-        assert(offset >= INT_MIN && offset <= INT_MAX);
-
         // At most 16 bytes can fit inside the Xmm register
         assert(IMPLICATION(store_size > 16, is_ymm));
 
@@ -1495,10 +1733,6 @@ public:
 
         auto xmm = Xbyak::Xmm(vmm.getIdx());
         auto ymm = Xbyak::Ymm(vmm.getIdx());
-
-        const auto addr = [&](int bytes_offset) {
-            return ptr[reg + offset + bytes_offset * sizeof(int8_t)];
-        };
 
         if (store_size == 32) {
             vmovups(addr(0), ymm);
@@ -1568,6 +1802,7 @@ public:
         }
     }
 
+public:
     /**
     * load_bytes_to_dword_extension is the utility function to facilitate
     * loading of load_size (0 <= load_size <= 16) many contiguous bytes in
@@ -1586,10 +1821,18 @@ public:
     * [0..8] for YMM version of the function.
     * TODO: Implement this routine for every ISA.
     */
-
     template <typename Vmm>
     void load_bytes_to_dword_extension(const Vmm &vmm, const Xbyak::Reg64 &reg,
             int64_t offset, bool is_signed, int load_size) {
+        // Ensure offset is at most 4 bytes to be encoded in the instruction
+        assert(offset >= INT_MIN && offset <= INT_MAX);
+        load_bytes_to_dword_extension(
+                vmm, ptr[reg + offset], is_signed, load_size);
+    }
+
+    template <typename Vmm>
+    void load_bytes_to_dword_extension(const Vmm &vmm,
+            const Xbyak::Address &src_addr, bool is_signed, int load_size) {
 
         constexpr bool is_xmm = std::is_same<Vmm, Xbyak::Xmm>::value;
         constexpr bool is_ymm = std::is_same<Vmm, Xbyak::Ymm>::value;
@@ -1603,9 +1846,6 @@ public:
         // For Xmm register, load capacity is halved (32 * load_size <= 128)
         assert(IMPLICATION(is_xmm, load_size <= 4));
 
-        // Ensure offset is at most 4 bytes to be encoded in the instruction
-        assert(offset >= INT_MIN && offset <= INT_MAX);
-
         // Ensure that vector register is compatible with the ISA in hand
         assert(IMPLICATION(is_ymm, is_valid_isa(avx)));
 
@@ -1616,17 +1856,17 @@ public:
         if (load_size == 8) {
             const auto ymm = Xbyak::Ymm(vmm.getIdx());
             if (is_signed)
-                vpmovsxbd(ymm, ptr[reg + offset]);
+                vpmovsxbd(ymm, src_addr);
             else
-                vpmovzxbd(ymm, ptr[reg + offset]);
+                vpmovzxbd(ymm, src_addr);
         } else if (load_size == 4) {
             const auto xmm = Xbyak::Xmm(vmm.getIdx());
             if (is_signed)
-                uni_vpmovsxbd(xmm, ptr[reg + offset]);
+                uni_vpmovsxbd(xmm, src_addr);
             else
-                uni_vpmovzxbd(xmm, ptr[reg + offset]);
+                uni_vpmovzxbd(xmm, src_addr);
         } else {
-            load_bytes(vmm, reg, offset, load_size);
+            load_bytes(vmm, src_addr, load_size);
             if (is_signed)
                 uni_vpmovsxbd(vmm, vmm);
             else
@@ -1696,6 +1936,14 @@ public:
     template <typename Vmm>
     void load_data(data_type_t type_in, const Vmm &vmm, const Xbyak::Reg64 &reg,
             int64_t offset, int load_size) {
+        // Ensure offset is at most 4 bytes to be encoded in the instruction
+        assert(offset >= INT_MIN && offset <= INT_MAX);
+        load_data(type_in, vmm, ptr[reg + offset], load_size);
+    }
+
+    template <typename Vmm>
+    void load_data(data_type_t type_in, const Vmm &vmm,
+            const Xbyak::Address &src_addr, int load_size) {
 
         assert(is_valid_isa(sse41)
                 && "routine is not supported for the current isa");
@@ -1703,15 +1951,55 @@ public:
         switch (type_in) {
             case data_type::f32:
             case data_type::s32:
-                load_bytes(vmm, reg, offset, sizeof(int32_t) * load_size);
+                load_bytes(vmm, src_addr, sizeof(int32_t) * load_size);
                 break;
             case data_type::s8:
             case data_type::u8:
                 load_bytes_to_dword_extension(
-                        vmm, reg, offset, type_in == data_type::s8, load_size);
+                        vmm, src_addr, type_in == data_type::s8, load_size);
                 break;
             default: assert(!"unsupported source data type");
         }
+    }
+
+    /* A utility function to process f32 tail (load, store or other) depending
+     * on tail size, stored in Reg64. Tail size must be value from 0 to 3/7
+     * (Xmm/Ymm). Tail process functions require integer as argument to specify
+     * behavior for each tail size.
+     *
+     * Only supported for Xmm and Ymm.
+     */
+    template <typename Vmm>
+    void runtime_tail_process(const Xbyak::Reg64 &reg_tail,
+            const Xbyak::Reg64 &reg_tmp,
+            const std::function<void(int)> &tail_process) {
+        constexpr int simd_w_ymm = 8;
+        constexpr int f32_bits = sizeof(float) * 8;
+        const auto simd_w = Vmm().getBit() / f32_bits;
+        assert(simd_w != Xbyak::Zmm().getBit() / f32_bits);
+
+        Xbyak::Label label_tbl, label_tbl_end;
+        Xbyak::Label l_case[simd_w_ymm];
+
+        mov(reg_tmp, label_tbl);
+        const Xbyak::Address label_address
+                = ptr[reg_tmp + reg_tail * sizeof(void *)];
+        jmp(label_address);
+
+        // create jump table
+        L(label_tbl);
+        for (size_t i = 0; i < simd_w; i++)
+            putL(l_case[i]);
+
+        // cases for each tail size - from 0 to 3/7
+        L(l_case[0]);
+        jmp(label_tbl_end, T_NEAR);
+        for (size_t i = 1; i < simd_w; i++) {
+            L(l_case[i]);
+            tail_process(i);
+            jmp(label_tbl_end, T_NEAR);
+        }
+        L(label_tbl_end);
     }
 
     DNNL_DISALLOW_COPY_AND_ASSIGN(jit_generator);

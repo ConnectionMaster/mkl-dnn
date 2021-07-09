@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -18,17 +18,22 @@
 
 #include "cpu/ref_reduction.hpp"
 
+#if DNNL_X64
+#include "cpu/x64/jit_uni_reduction.hpp"
+using namespace dnnl::impl::cpu::x64;
+#endif
+
 namespace dnnl {
 namespace impl {
 namespace cpu {
-
-using pd_create_f = engine_t::primitive_desc_create_f;
 
 namespace {
 using namespace dnnl::impl::data_type;
 
 // clang-format off
-const pd_create_f impl_list[] = {
+const impl_list_item_t impl_list[] = {
+    CPU_INSTANCE_X64(jit_uni_reduction_t)
+
     CPU_INSTANCE(ref_reduction_t<f32, f32, f32>)
     CPU_INSTANCE(ref_reduction_t<bf16, bf16, f32>)
     CPU_INSTANCE(ref_reduction_t<bf16, f32, f32>)
@@ -44,7 +49,7 @@ const pd_create_f impl_list[] = {
 // clang-format on
 } //namespace
 
-const pd_create_f *get_reduction_impl_list(const reduction_desc_t *desc) {
+const impl_list_item_t *get_reduction_impl_list(const reduction_desc_t *desc) {
     UNUSED(desc);
     return impl_list;
 };

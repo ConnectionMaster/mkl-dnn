@@ -285,12 +285,17 @@ void _jit_avx512_common_conv_fwd_kernel<Vmm>::store_output(int ur_w) {
 
     L(store_label);
 
+    const auto is_padding = jcp.oc_without_padding != jcp.oc;
     for (int k = 0; k < jcp.nb_oc_blocking; k++)
         for (int j = 0; j < ur_w; j++) {
             Vmm vmm = vmm_out(j, k);
             // mask only needed for last oc_block
-            if (oc_tail && k + 1 == jcp.nb_oc_blocking)
-                vmm = vmm | k_oc_tail_mask;
+            if (oc_tail && k + 1 == jcp.nb_oc_blocking) {
+                if (is_padding)
+                    vmovups(vmm | k_oc_tail_mask | T_z, vmm);
+                else
+                    vmm = vmm | k_oc_tail_mask;
+            }
             size_t aux_output_offset = get_output_offset(j, k);
 
             vmovups(EVEX_compress_addr_safe(
@@ -1339,7 +1344,7 @@ void _jit_avx512_common_conv_fwd_kernel<Vmm>::generate() {
 status_t jit_avx512_common_conv_fwd_kernel::init_conf(jit_conv_conf_t &jcp,
         const convolution_desc_t &cd, memory_desc_t &src_md,
         memory_desc_t &weights_md, memory_desc_t &dst_md,
-        memory_desc_t &bias_md, const primitive_attr_t &attr, int nthreads) {
+        memory_desc_t &bias_md, primitive_attr_t &attr, int nthreads) {
     using namespace prop_kind;
 
     if (!mayiuse(avx512_common)) return status::unimplemented;
@@ -1446,31 +1451,8 @@ status_t jit_avx512_common_conv_fwd_kernel::init_conf(jit_conv_conf_t &jcp,
                 jcp.oc % jcp.oc_block == 0 && jcp.ic % jcp.ic_block == 0))
         return status::unimplemented;
 
-    const auto &post_ops = attr.post_ops_;
-    jcp.with_sum = post_ops.find(primitive_kind::sum) != -1;
-    const int eltwise_ind = post_ops.find(primitive_kind::eltwise);
-    jcp.with_eltwise = eltwise_ind != -1;
-    if (jcp.with_eltwise) {
-        if (dst_d.data_type() == data_type::s32) return status::unimplemented;
-    }
-    const int binary_ind = post_ops.find(primitive_kind::binary);
-    jcp.with_binary = binary_ind != -1;
-
-    jcp.post_ops = post_ops;
-
-    using namespace injector;
-    static constexpr bool sum_at_pos_0_only = true;
-    static constexpr bool sum_requires_scale_one = true;
-    const bool post_ops_ok_
-            = post_ops_ok({avx512_common, {eltwise, binary, sum}, jcp.post_ops,
-                    &dst_d, sum_at_pos_0_only, sum_requires_scale_one});
-    if (!post_ops_ok_) return status::unimplemented;
-
     jcp.ic_tail = is_data_layout_nxc ? jcp.ic % jcp.simd_w : 0;
-    if (is_data_layout_nxc)
-        jcp.oc_tail = jcp.oc % jcp.simd_w;
-    else
-        jcp.oc_tail = jcp.with_binary ? jcp.oc_without_padding % jcp.simd_w : 0;
+    jcp.oc_tail = jcp.oc_without_padding % jcp.simd_w;
 
     format_tag_t src_tag, dst_tag, wei_tag;
 
@@ -1510,6 +1492,31 @@ status_t jit_avx512_common_conv_fwd_kernel::init_conf(jit_conv_conf_t &jcp,
         if (bias_d.format_kind() == format_kind::any)
             CHECK(memory_desc_init_by_tag(bias_md, x));
     }
+
+    CHECK(attr.set_default_formats(&dst_md));
+
+    const auto &post_ops = attr.post_ops_;
+    jcp.with_sum = post_ops.find(primitive_kind::sum) != -1;
+    const int eltwise_ind = post_ops.find(primitive_kind::eltwise);
+    jcp.with_eltwise = eltwise_ind != -1;
+    if (jcp.with_eltwise) {
+        if (dst_d.data_type() == data_type::s32) return status::unimplemented;
+    }
+    const int binary_ind = post_ops.find(primitive_kind::binary);
+    jcp.with_binary = binary_ind != -1;
+
+    jcp.post_ops = post_ops;
+
+    using namespace injector;
+    static constexpr bool sum_at_pos_0_only = true;
+    static constexpr bool sum_requires_scale_one = true;
+    static constexpr bool sum_requires_zp_zero = true;
+    const bool post_ops_ok_ = post_ops_ok({avx512_common,
+            {eltwise, binary, sum}, jcp.post_ops, &dst_d, sum_at_pos_0_only,
+            sum_requires_scale_one, sum_requires_zp_zero,
+            {broadcasting_strategy_t::scalar,
+                    broadcasting_strategy_t::per_oc}});
+    if (!post_ops_ok_) return status::unimplemented;
 
     if (mayiuse(avx512_common) && src_d.data_type() == data_type::f32
             && weights_d.data_type() == data_type::f32
@@ -1956,8 +1963,8 @@ void _jit_avx512_common_conv_bwd_data_kernel_f32<Vmm>::prepare_output(
 template <typename Vmm>
 void _jit_avx512_common_conv_bwd_data_kernel_f32<Vmm>::store_output(int ur_w) {
     Label no_update_label;
-    const int ic_tail = jcp.ic_tail;
-
+    const int ic_tail = jcp.ic_without_padding % jcp.simd_w;
+    const bool dsrc_layout_nxc = is_dsrc_layout_nxc();
     mov(reg_channel, ptr[param + GET_OFF(channel)]);
     cmp(reg_channel, 0);
     je(no_update_label, T_NEAR);
@@ -1976,7 +1983,7 @@ void _jit_avx512_common_conv_bwd_data_kernel_f32<Vmm>::store_output(int ur_w) {
         for (int j = 0; j < ur_w; j++) {
             Vmm vmm = vmm_out(j, k);
             // mask only needed for last oc_block
-            if (ic_tail && k + 1 == jcp.nb_ic_blocking)
+            if (ic_tail && k + 1 == jcp.nb_ic_blocking && dsrc_layout_nxc)
                 vmm = vmm | k_ic_tail_mask;
             size_t aux_src_offset = get_diff_src_offset(j, k);
             vmovups(EVEX_compress_addr_safe(

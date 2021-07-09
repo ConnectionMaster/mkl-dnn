@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -33,6 +33,7 @@ namespace gpu {
 namespace ocl {
 
 struct ref_layer_normalization_fwd_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_layer_normalization_fwd_pd_t {
         using gpu_layer_normalization_fwd_pd_t::
                 gpu_layer_normalization_fwd_pd_t;
@@ -64,8 +65,6 @@ struct ref_layer_normalization_fwd_t : public gpu_primitive_t {
         lnorm_conf_t conf;
     };
 
-    ref_layer_normalization_fwd_t(const pd_t *apd) : gpu_primitive_t(apd) {}
-
     status_t init(engine_t *engine) override {
         compute::kernel_ctx_t kernel_ctx;
 
@@ -90,6 +89,7 @@ private:
 };
 
 struct ref_layer_normalization_bwd_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_layer_normalization_bwd_pd_t {
         using gpu_layer_normalization_bwd_pd_t::
                 gpu_layer_normalization_bwd_pd_t;
@@ -111,16 +111,17 @@ struct ref_layer_normalization_bwd_t : public gpu_primitive_t {
                     && attr()->has_default_values();
             if (!ok) return status::unimplemented;
 
-            return init_conf(engine);
+            CHECK(init_conf(engine));
+            if (conf.vectorize_bwd_scaleshift) { init_scratchpad(); }
+            return status::success;
         }
 
         status_t init_conf(engine_t *engine);
         status_t init_kernel_ctx(compute::kernel_ctx_t &kernel_ctx) const;
+        void init_scratchpad();
 
         lnorm_conf_t conf;
     };
-
-    ref_layer_normalization_bwd_t(const pd_t *apd) : gpu_primitive_t(apd) {}
 
     status_t init(engine_t *engine) override {
         compute::kernel_ctx_t kernel_ctx;
@@ -129,10 +130,16 @@ struct ref_layer_normalization_bwd_t : public gpu_primitive_t {
         CHECK(status);
 
         create_kernel(engine, &kernel_, "ref_lnorm_bwd", kernel_ctx);
-        if (pd()->conf.use_scaleshift) {
+        if (pd()->conf.use_scaleshift || pd()->conf.use_scale
+                || pd()->conf.use_shift) {
             create_kernel(engine, &kernel_scaleshift_,
                     "ref_lnorm_bwd_scaleshift", kernel_ctx);
             if (!kernel_scaleshift_) return status::runtime_error;
+            if (pd()->conf.vectorize_bwd_scaleshift) {
+                create_kernel(engine, &kernel_scaleshift_finalize_,
+                        "ref_lnorm_bwd_scaleshift_final", kernel_ctx);
+                if (!kernel_scaleshift_finalize_) return status::runtime_error;
+            }
         }
         if (!kernel_) return status::runtime_error;
 
@@ -148,6 +155,7 @@ private:
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
 
     compute::kernel_t kernel_scaleshift_;
+    compute::kernel_t kernel_scaleshift_finalize_;
     compute::kernel_t kernel_;
 };
 

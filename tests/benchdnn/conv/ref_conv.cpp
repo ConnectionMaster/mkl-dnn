@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -21,14 +21,14 @@
 namespace conv {
 
 template <typename get_args_func>
-void exec_conv(get_args_func get_args, const prb_t *prb, dnnl_primitive_t c_ref,
-        dnn_mem_t &src_m, dnn_mem_t &wei_m, dnn_mem_t &bia_m,
-        dnn_mem_t &dst_m) {
+void exec_conv(get_args_func get_args, const prb_t *prb,
+        dnnl_primitive_t prim_ref, dnn_mem_t &src_m, dnn_mem_t &wei_m,
+        dnn_mem_t &bia_m, dnn_mem_t &dst_m) {
     const_dnnl_primitive_desc_t pd_ref;
     dnnl_engine_t engine_ref;
 
-    SAFE_V(dnnl_primitive_get_primitive_desc(c_ref, &pd_ref));
-    SAFE_V(dnnl_primitive_desc_query(
+    DNN_SAFE_V(dnnl_primitive_get_primitive_desc(prim_ref, &pd_ref));
+    DNN_SAFE_V(dnnl_primitive_desc_query(
             pd_ref, dnnl_query_engine, 0, &engine_ref));
     const auto &scratchpad_md = *dnnl_primitive_desc_query_md(
             pd_ref, dnnl_query_exec_arg_md, DNNL_ARG_SCRATCHPAD);
@@ -47,7 +47,7 @@ void exec_conv(get_args_func get_args, const prb_t *prb, dnnl_primitive_t c_ref,
 
     args_t args = get_args(prb, src_ref, wei_ref, bia_ref, dst_ref);
     args.set(DNNL_ARG_SCRATCHPAD, scratchpad);
-    SAFE_V(execute_and_wait(c_ref, args));
+    SAFE_V(execute_and_wait(prim_ref, args));
 }
 
 args_t get_args_conv_fwd(const prb_t *prb, dnn_mem_t &src_ref,
@@ -82,11 +82,11 @@ args_t get_args_conv_bwd_w(const prb_t *prb, dnn_mem_t &src_ref,
     return args;
 }
 
-void compute_ref_fwd(const prb_t *prb, dnnl_primitive_t c_ref, dnn_mem_t &src_m,
-        dnn_mem_t &wei_m, dnn_mem_t &bia_m,
+void compute_ref_fwd(const prb_t *prb, dnnl_primitive_t prim_ref,
+        dnn_mem_t &src_m, dnn_mem_t &wei_m, dnn_mem_t &bia_m,
         const std::vector<dnn_mem_t> &binary_po, dnn_mem_t &dst_m) {
-    if (c_ref) {
-        exec_conv(get_args_conv_fwd, prb, c_ref, src_m, wei_m, bia_m, dst_m);
+    if (prim_ref) {
+        exec_conv(get_args_conv_fwd, prb, prim_ref, src_m, wei_m, bia_m, dst_m);
         return;
     }
     if (prb->alg == WINO && prb->cfg[SRC].dt == dnnl_f32) {
@@ -96,11 +96,11 @@ void compute_ref_fwd(const prb_t *prb, dnnl_primitive_t c_ref, dnn_mem_t &src_m,
     }
 }
 
-void compute_ref_bwd_d(const prb_t *prb, dnnl_primitive_t c_ref,
+void compute_ref_bwd_d(const prb_t *prb, dnnl_primitive_t prim_ref,
         dnn_mem_t &diff_src_m, dnn_mem_t &wei_m, dnn_mem_t &bia_m,
         const std::vector<dnn_mem_t> &binary_po, dnn_mem_t &diff_dst_m) {
-    if (c_ref) {
-        exec_conv(get_args_conv_bwd_d, prb, c_ref, diff_src_m, wei_m, bia_m,
+    if (prim_ref) {
+        exec_conv(get_args_conv_bwd_d, prb, prim_ref, diff_src_m, wei_m, bia_m,
                 diff_dst_m);
         return;
     }
@@ -112,11 +112,11 @@ void compute_ref_bwd_d(const prb_t *prb, dnnl_primitive_t c_ref,
     }
 }
 
-void compute_ref_bwd_w(const prb_t *prb, dnnl_primitive_t c_ref,
+void compute_ref_bwd_w(const prb_t *prb, dnnl_primitive_t prim_ref,
         dnn_mem_t &src_m, dnn_mem_t &diff_wei_m, dnn_mem_t &diff_bia_m,
         dnn_mem_t &diff_dst_m) {
-    if (c_ref) {
-        exec_conv(get_args_conv_bwd_w, prb, c_ref, src_m, diff_wei_m,
+    if (prim_ref) {
+        exec_conv(get_args_conv_bwd_w, prb, prim_ref, src_m, diff_wei_m,
                 diff_bia_m, diff_dst_m);
         return;
     }
@@ -226,6 +226,18 @@ void compute_ref_direct_bwd_d(const prb_t *prb, dnn_mem_t &diff_src_m,
     enum { precompute_size = 16 };
     const bool fast = MAX3(KD, KH, KW) <= precompute_size;
 
+    // from bwd pov zp src from fwd is zp diff dst and
+    // zp dst is zp dst is zp diff_src
+    const auto map_arg_to_zp_arg = [](int num) {
+        switch (num) {
+            case DNNL_ARG_DIFF_DST: return DNNL_ARG_SRC;
+            case DNNL_ARG_DIFF_SRC: return DNNL_ARG_DST;
+            default: assert(false && "map_arg_to_zp_arg unsupported arg");
+        }
+
+        return -1;
+    };
+
     /* pre-computes arrays of oh(ow) and kh(kw) for traversing in kernel */
     auto precompute_ok
             = [](int64_t i, int64_t O, int64_t K, int64_t S, int64_t P,
@@ -265,7 +277,10 @@ void compute_ref_direct_bwd_d(const prb_t *prb, dnn_mem_t &diff_src_m,
                         = ((oc * OD + od[d]) * OH + oh[h]) * OW + ow[w];
                 const int64_t wei_off
                         = ((oc * ICG * KD + kd[d]) * KH + kh[h]) * KW + kw[w];
-                ds += diff_dst_loc[diff_dst_off] * wei_loc[wei_off];
+                float diff_dst_val = diff_dst_loc[diff_dst_off];
+                maybe_zero_point(prb->attr, diff_dst_val, prb->src_zp,
+                        g * OCG + oc, map_arg_to_zp_arg(DNNL_ARG_DIFF_DST));
+                ds += diff_dst_val * wei_loc[wei_off];
             }
         }
     };
@@ -294,7 +309,12 @@ void compute_ref_direct_bwd_d(const prb_t *prb, dnn_mem_t &diff_src_m,
                                 = ((oc * OD + od) * OH + oh) * OW + ow;
                         const int64_t wei_off
                                 = ((oc * ICG * KD + kd) * KH + kh) * KW + kw;
-                        ds += diff_dst_loc[diff_dst_off] * wei_loc[wei_off];
+                        float diff_dst_val = diff_dst_loc[diff_dst_off];
+                        maybe_zero_point(prb->attr, diff_dst_val, prb->src_zp,
+                                g * OCG + oc,
+                                map_arg_to_zp_arg(DNNL_ARG_DIFF_DST));
+
+                        ds += diff_dst_val * wei_loc[wei_off];
                     }
                 }
             }
@@ -328,6 +348,8 @@ void compute_ref_direct_bwd_d(const prb_t *prb, dnn_mem_t &diff_src_m,
                     v_binary_vals.push_back(binary_val);
                 }
                 maybe_post_ops(prb->attr, conv_res, ds, v_binary_vals);
+                maybe_zero_point(prb->attr, conv_res, prb->dst_zp, g * ICG + ic,
+                        map_arg_to_zp_arg(DNNL_ARG_DIFF_SRC), true);
 
                 ds = conv_res;
             });

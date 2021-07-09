@@ -20,9 +20,12 @@ where *conv-knobs* are:
  - `--alg={DIRECT [default], WINO, AUTO}` -- convolution algorithm. `WINO` is
             Winograd-based convolution. `AUTO` will pick one of `DIRECT` or
             `WINO` automatically, library-based decision.
- - `--attr-oscale="STRING"` -- output scale primitive attribute. No oscale is
+ - `--attr-oscale=STRING` -- output scale primitive attribute. No oscale is
             set by default. Refer to [attributes](knobs_attr.md) for details.
- - `--attr-post-ops="STRING"` -- post operation primitive attribute. No post
+ - `--attr-zero-points=STRING` -- zero points primitive attribute. No zero
+            points are set by default. Refer to [attributes](knobs_attr.md)
+            for details.
+ - `--attr-post-ops=STRING` -- post operation primitive attribute. No post
             operations are set by default. Refer to [attributes](knobs_attr.md)
             for details.
  - `--mb=INT` -- override minibatch size specified in the problem description.
@@ -53,6 +56,7 @@ The table below shows supported name configurations for this driver:
 | src  | wei  | dst  | acc  | cfg             | notes
 |:---  |:---  |:---  |:---  |:---             |:---
 | f32  | f32  | f32  | f32  | f32             | inference optimized for sse4.1+, training for avx2+
+| f32  | f32  | s8   | f32  | f32f32s8        | Only for GPU
 | u8   | s8   | f32  | s32  | u8s8f32         | optimized for processors with support of avx512vl, FWD_x only.
 | u8   | s8   | s32  | s32  | u8s8s32         | same as above
 | u8   | s8   | s8   | s32  | u8s8s8          | same as above
@@ -67,6 +71,7 @@ The table below shows supported name configurations for this driver:
 | u8   | s8   | s8   | s32  | u8s8s8_wino     | same as above
 | u8   | s8   | u8   | s32  | u8s8u8_wino     | same as above
 | f16  | f16  | f16  | f16  | f16             | Only for GPU
+| f16  | f16  | s8   | f16  | f16f16s8        | Only for GPU
 | bf16 | bf16 | bf16 | f32  | bf16bf16bf16    | optimized for processors with support of avx512vl + VNNI
 | bf16 | bf16 | f32  | f32  | bf16bf16f32     | same as above
 | bf16 | f32  | bf16 | f32  | bf16f32bf16     | same as above

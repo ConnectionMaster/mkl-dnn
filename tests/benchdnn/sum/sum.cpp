@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -51,13 +51,12 @@ static int init_pd(dnnl_engine_t engine, const prb_t *prb,
                 CRIT);
     }
 
-    auto dnnl_attr = create_dnnl_attr(prb->attr, attr_args_t());
+    auto dnnl_attr = make_benchdnn_dnnl_wrapper(
+            create_dnnl_attr(prb->attr, attr_args_t()));
 
     dnnl_status_t init_status = dnnl_sum_primitive_desc_create(&spd,
             prb->dtag != tag::undef ? &dst_d : nullptr, prb->n_inputs(),
             prb->scales.data(), src_d.data(), dnnl_attr, engine);
-
-    dnnl_primitive_attr_destroy(dnnl_attr);
 
     if (init_status == dnnl_unimplemented)
         return res->state = UNIMPLEMENTED, OK;
@@ -66,6 +65,18 @@ static int init_pd(dnnl_engine_t engine, const prb_t *prb,
 
     res->impl_name = query_impl_info(spd);
     BENCHDNN_PRINT(5, "oneDNN implementation: %s\n", res->impl_name.c_str());
+
+    if (attr_same_pd_check && !prb->attr.is_def()) {
+        dnnl_primitive_desc_t pd_no_attr {};
+        dnnl_primitive_attr_t dnnl_empty_attrs {};
+        DNN_SAFE(dnnl_sum_primitive_desc_create(&pd_no_attr,
+                         prb->dtag != tag::undef ? &dst_d : nullptr,
+                         prb->n_inputs(), prb->scales.data(), src_d.data(),
+                         dnnl_empty_attrs, engine),
+                WARN);
+        auto pd_no_attr_wrapper = make_benchdnn_dnnl_wrapper(pd_no_attr);
+        SAFE(check_same_pd(res, pd_no_attr_wrapper), WARN);
+    }
 
     return OK;
 }
@@ -101,17 +112,17 @@ int doit(const prb_t *prb, res_t *res) {
     if (bench_mode == LIST) return res->state = LISTED, OK;
 
     check_known_skipped_case(prb, res);
+    check_sum_post_ops(prb->attr, res);
     if (res->state == SKIPPED) return OK;
 
-    dnnl_primitive_t s {};
-    SAFE(init_prim(&s, init_pd, prb, res), WARN);
+    benchdnn_dnnl_wrapper_t<dnnl_primitive_t> prim;
+    SAFE(init_prim(prim, init_pd, prb, res), WARN);
     if (res->state == SKIPPED || res->state == UNIMPLEMENTED) return OK;
 
     const_dnnl_primitive_desc_t const_pd;
-    DNN_SAFE(dnnl_primitive_get_primitive_desc(s, &const_pd), CRIT);
+    DNN_SAFE(dnnl_primitive_get_primitive_desc(prim, &const_pd), CRIT);
 
     if (check_mem_size(const_pd) != OK) {
-        DNN_SAFE_V(dnnl_primitive_destroy(s));
         return res->state = SKIPPED, res->reason = NOT_ENOUGH_RAM, OK;
     }
 
@@ -144,20 +155,16 @@ int doit(const prb_t *prb, res_t *res) {
         args.set(DNNL_ARG_MULTIPLE_SRC + i_input, src_dt[i_input]);
     }
 
-    SAFE(execute_and_wait(s, args), WARN);
+    SAFE(execute_and_wait(prim, args), WARN);
 
-    if (bench_mode & CORR) {
+    if (is_bench_mode(CORR)) {
         compute_ref(prb, src_fp, dst_fp);
         compare::compare_t cmp;
         cmp.set_threshold(epsilon_dt(dst_md.data_type) * prb->n_inputs());
         SAFE(cmp.compare(dst_fp, dst_dt, prb->attr, res), WARN);
     }
 
-    measure_perf(res->timer, s, args);
-
-    DNN_SAFE_V(dnnl_primitive_destroy(s));
-
-    return OK;
+    return measure_perf(res->timer, prim, args);
 }
 
 } // namespace sum

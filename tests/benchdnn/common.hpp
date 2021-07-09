@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <bitset>
 #include <cinttypes>
 #include <functional>
 #include <string>
@@ -61,47 +62,34 @@ enum { CRIT = 1, WARN = 2 };
 
 #define SAFE(f, s) \
     do { \
-        int status = (f); \
-        if (status != OK) { \
+        int status__ = (f); \
+        if (status__ != OK) { \
             if (s == CRIT || s == WARN) { \
                 fprintf(stderr, "@@@ error [%s:%d]: '%s' -> %d\n", \
-                        __PRETTY_FUNCTION__, __LINE__, STRINGIFY(f), status); \
+                        __PRETTY_FUNCTION__, __LINE__, STRINGIFY(f), \
+                        status__); \
                 fflush(0); \
                 if (s == CRIT) exit(1); \
             } \
-            return status; \
+            return status__; \
         } \
     } while (0)
 
 #define SAFE_V(f) \
     do { \
-        int status = (f); \
-        if (status != OK) { \
+        int status__ = (f); \
+        if (status__ != OK) { \
             fprintf(stderr, "@@@ error [%s:%d]: '%s' -> %d\n", \
-                    __PRETTY_FUNCTION__, __LINE__, STRINGIFY(f), status); \
+                    __PRETTY_FUNCTION__, __LINE__, STRINGIFY(f), status__); \
             fflush(0); \
             exit(1); \
-        } \
-    } while (0)
-
-#define SAFE_CLEAN(f, s, clean) \
-    do { \
-        int status = (f); \
-        if (status != OK) { \
-            if (s == CRIT || s == WARN) { \
-                fprintf(stderr, "@@@ error [%s:%d]: '%s' -> %d\n", \
-                        __PRETTY_FUNCTION__, __LINE__, STRINGIFY(f), status); \
-                fflush(0); \
-                if (s == CRIT) exit(1); \
-            } \
-            clean(); \
-            return status; \
         } \
     } while (0)
 
 extern int verbose;
 extern bool canonical;
 extern bool mem_check;
+extern bool attr_same_pd_check;
 extern std::string skip_impl; /* empty or "" means skip nothing */
 
 #define BENCHDNN_PRINT(v, fmt, ...) \
@@ -117,16 +105,12 @@ extern std::string skip_impl; /* empty or "" means skip nothing */
     T(const T &) = delete; \
     T &operator=(const T &) = delete;
 
-enum bench_mode_t {
-    MODE_UNDEF = 0x0,
-    CORR = 0x1,
-    PERF = 0x2,
-    LIST = 0x4,
-};
-const char *bench_mode2str(bench_mode_t mode);
-bench_mode_t str2bench_mode(const char *str);
-extern bench_mode_t bench_mode;
+using bench_mode_t = std::bitset<4>;
+extern bench_mode_t RUN, CORR, PERF, LIST; // pre-defined modes
+extern bench_mode_t bench_mode; // user mode
 extern const char *driver_name;
+
+bool is_bench_mode(bench_mode_t user_mode);
 
 /* perf */
 extern double max_ms_per_prb; /** maximum time spends per prb in ms */

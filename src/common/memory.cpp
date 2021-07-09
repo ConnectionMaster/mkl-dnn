@@ -96,7 +96,7 @@ status_t dnnl_memory::set_data_handle(void *handle, stream_t *stream) {
     CHECK(memory_storage()->get_data_handle(&old_handle));
 
     if (handle != old_handle) {
-        CHECK(memory_storage()->set_data_handle(handle));
+        CHECK(memory_storage_->set_data_handle(handle));
     }
     return status::success;
 }
@@ -189,9 +189,8 @@ status_t dnnl_memory_desc_init_by_strides(memory_desc_t *memory_desc, int ndims,
                     : default_strides[d + 1] * md.padded_dims[d + 1];
         }
         strides = default_strides;
-    } else {
-        /* TODO: add sanity check for the provided strides */
     }
+    if (!memory_desc_strides_check(md, strides)) return invalid_arguments;
 
     array_copy(md.format_desc.blocking.strides, strides, md.ndims);
 
@@ -495,12 +494,19 @@ size_t dnnl_memory_desc_get_size(const memory_desc_t *md) {
     return memory_desc_wrapper(*md).size();
 }
 
+size_t dnnl_data_type_size(dnnl_data_type_t data_type) {
+    return types::data_type_size(data_type);
+}
+
 status_t dnnl_memory_create(memory_t **memory, const memory_desc_t *md,
         engine_t *engine, void *handle) {
 #ifdef DNNL_WITH_SYCL
-    return dnnl_sycl_interop_memory_create(
-            memory, md, engine, dnnl_sycl_interop_usm, handle);
-#else
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_SYCL
+    if (engine->kind() == engine_kind::gpu)
+#endif
+        return dnnl_sycl_interop_memory_create(
+                memory, md, engine, dnnl_sycl_interop_usm, handle);
+#endif
     if (any_null(memory, engine)) return invalid_arguments;
 
     memory_desc_t z_md = types::zero_md();
@@ -522,7 +528,6 @@ status_t dnnl_memory_create(memory_t **memory, const memory_desc_t *md,
     }
     *memory = _memory;
     return success;
-#endif
 }
 
 status_t dnnl_memory_get_memory_desc(

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -27,28 +27,29 @@ namespace x64 {
 
 class jit_prelu_base_kernel_t : public jit_generator {
 public:
-    jit_prelu_base_kernel_t(const cpu_isa_t &isa, const prelu::bcast &bcast,
-            const memory_desc_wrapper &tensor_md,
-            size_t number_vmm_single_compute);
+    jit_prelu_base_kernel_t(const cpu_isa_t &isa, const int vlen,
+            const prelu::bcast &bcast, const memory_desc_wrapper &tensor_md,
+            const size_t number_vmm_single_compute);
 
     size_t simd_w() const noexcept;
     prelu::bcast get_bcast() const noexcept;
 
 protected:
     int reserve_vmm();
-    int get_compute_vmm(size_t base_idx, size_t unroll_group);
+    int get_compute_vmm(size_t base_idx, size_t unroll_group) const;
 
     size_t get_number_reserved_vmms() const noexcept;
+
     const cpu_isa_t isa_;
     const size_t simd_w_ = 0;
     const prelu::bcast bcast_ = prelu::bcast::unsupported;
     const size_t tail_size_ = 0u;
-    const data_type_t data_type_ = data_type::undef;
     const Xbyak::Reg64 &reg_data_size_ = r8;
     const Xbyak::Reg64 &reg_offset_ = r9;
 
 private:
     void generate() override;
+    virtual bool any_tensor_bf16() const = 0;
     virtual void load_kernel_call_params() = 0;
     virtual void prepare_kernel_const_vars() = 0;
     virtual void compute_dst(size_t unrolling_factor, bool tail) = 0;
@@ -57,7 +58,7 @@ private:
     size_t calc_tail_size(const memory_desc_wrapper &tensor_md) const noexcept;
     const memory_desc_wrapper tensor_md_;
     const size_t number_vmm_single_compute_ = 0;
-    int number_reserved_vmms_ = 0;
+    size_t number_reserved_vmms_ = 0;
 };
 
 } // namespace x64

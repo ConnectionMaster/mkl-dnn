@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -39,6 +39,7 @@ namespace ngen {
 
 // Forward declarations.
 template <HW hw> class BinaryCodeGenerator;
+template <HW hw> class ELFCodeGenerator;
 
 // MSVC v140 workaround for enum comparison in template arguments.
 static constexpr bool hwLT(HW hw1, HW hw2) { return hw1 < hw2; }
@@ -60,10 +61,10 @@ inline unsigned getRegFile(const ExtendedReg &reg)     { return getRegFile(reg.g
 inline unsigned getRegFile(const Immediate &imm)       { return RegFileIMM; }
 
 // -----------------------------------------------------------------------
-// Binary formats, split between pre-Gen12 and post-Gen12.
+// Binary formats, split between pre-Xe and post-Xe.
 
 #include "ngen_gen8.hpp"
-#include "ngen_gen12.hpp"
+#include "ngen_xe.hpp"
 
 // -----------------------------------------------------------------------
 
@@ -89,6 +90,8 @@ public:
 template <HW hw>
 class BinaryCodeGenerator
 {
+    friend class ELFCodeGenerator<hw>;
+
 protected:
     class InstructionStream {
         friend class BinaryCodeGenerator;
@@ -162,19 +165,22 @@ protected:
 
     class Program {
         friend class BinaryCodeGenerator;
-
+        using Instruction = Instruction12;
         std::vector<uint64_t> &code;
 
         Program(InstructionStream &stream) : code(stream.code) {};
 
     public:
-        size_t size() const                                 { return code.size() >> 1; }
-        Instruction12 &operator[](size_t index)             { return *reinterpret_cast<Instruction12 *>(&code[index * 2]); }
-        const Instruction12 &operator[](size_t index) const { return *reinterpret_cast<Instruction12 *>(&code[index * 2]); }
+        size_t size() const                               { return code.size() >> 1; }
+        Instruction &operator[](size_t index)             { return *reinterpret_cast<Instruction *>(&code[index * 2]); }
+        const Instruction &operator[](size_t index) const { return *reinterpret_cast<Instruction *>(&code[index * 2]); }
     };
 
     static constexpr HW hardware = hw;
-    static constexpr bool isGen12 = (hw >= HW::Gen12LP);
+    static constexpr bool isXe = (hw >= HW::Xe_LP);
+
+    Label _labelLocalIDsLoaded;
+    Label _labelArgsLoaded;
 
 private:
     InstructionModifier defaultModifier;
@@ -188,31 +194,31 @@ private:
     void addFixup(LabelFixup fixup) { streamStack.back()->addFixup(fixup); }
 
     template <bool forceWE = false, typename D, typename S0, HW hw_ = hw>
-    typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0);
+    typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0);
     template <bool forceWE = false, typename D, typename S0, HW hw_ = hw>
-    typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0);
+    typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0);
     template <bool forceWE = false, typename D, HW hw_ = hw>
-    typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, const Immediate &src0);
+    typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, const Immediate &src0);
     template <bool forceWE = false, typename D, HW hw_ = hw>
-    typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, const Immediate &src0);
+    typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, const Immediate &src0);
 
     template <bool forceWE = false, typename D, typename S0, typename S1, HW hw_ = hw>
-    typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0, S1 src1);
+    typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0, S1 src1);
     template <bool forceWE = false, typename D, typename S0, typename S1, HW hw_ = hw>
-    typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0, S1 src1);
+    typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0, S1 src1);
     template <bool forceWE = false, typename D, typename S0, HW hw_ = hw>
-    typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0, const Immediate &src1);
+    typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0, const Immediate &src1);
     template <bool forceWE = false, typename D, typename S0, HW hw_ = hw>
-    typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0, const Immediate &src1);
+    typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0, const Immediate &src1);
 
     template <HW hw_ = hw>
     typename std::enable_if<hwLE(hw_, HW::Gen9)>::type opX(Opcode op, DataType defaultType, const InstructionModifier &mod, RegData dst, RegData src0, RegData src1, RegData src2);
     template <HW hw_ = hw>
-    typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type opX(Opcode op, DataType defaultType, const InstructionModifier &mod, Align16Operand dst, Align16Operand src0, Align16Operand src1, Align16Operand src2);
+    typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type opX(Opcode op, DataType defaultType, const InstructionModifier &mod, Align16Operand dst, Align16Operand src0, Align16Operand src1, Align16Operand src2);
     template <typename D, typename S0, typename S1, typename S2, HW hw_ = hw>
-    typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0, S1 src1, S2 src2);
+    typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0, S1 src1, S2 src2);
     template <typename D, typename S0, typename S1, typename S2, HW hw_ = hw>
-    typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0, S1 src1, S2 src2);
+    typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0, S1 src1, S2 src2);
 
     template <typename DS0>
     void opMath(Opcode op, DataType defaultType, const InstructionModifier &mod, MathFunction fc, DS0 dst, DS0 src0);
@@ -220,38 +226,38 @@ private:
     void opMath(Opcode op, DataType defaultType, const InstructionModifier &mod, MathFunction fc, DS0 dst, DS0 src0, S1 src1);
 
     template <typename D, HW hw_ = hw>
-    typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type opSend(Opcode op, const InstructionModifier &mod, SharedFunction sfid, const RegData &dst, const RegData &src0, const RegData &src1, uint32_t exdesc, D desc);
+    typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type opSend(Opcode op, const InstructionModifier &mod, SharedFunction sfid, const RegData &dst, const RegData &src0, const RegData &src1, uint32_t exdesc, D desc);
     template <typename D, HW hw_ = hw>
-    typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type opSend(Opcode op, const InstructionModifier &mod, SharedFunction sfid, const RegData &dst, const RegData &src0, const RegData &src1, const RegData &exdesc, D desc);
+    typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type opSend(Opcode op, const InstructionModifier &mod, SharedFunction sfid, const RegData &dst, const RegData &src0, const RegData &src1, const RegData &exdesc, D desc);
     template <typename ED, typename D, HW hw_ = hw>
-    typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type opSend(Opcode op, const InstructionModifier &mod, SharedFunction sfid, const RegData &dst, const RegData &src0, const RegData &src1, ED exdesc, D desc);
+    typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type opSend(Opcode op, const InstructionModifier &mod, SharedFunction sfid, const RegData &dst, const RegData &src0, const RegData &src1, ED exdesc, D desc);
 
     template <HW hw_ = hw>
-    typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type opSend(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0, uint32_t exdesc, uint32_t desc);
+    typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type opSend(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0, uint32_t exdesc, uint32_t desc);
     template <HW hw_ = hw>
-    typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type opSend(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0, uint32_t exdesc, const RegData &desc);
+    typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type opSend(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0, uint32_t exdesc, const RegData &desc);
     template <typename D, HW hw_ = hw>
-    typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type opSend(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0, uint32_t exdesc, D desc);
+    typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type opSend(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0, uint32_t exdesc, D desc);
 
     template <typename ED, typename D, HW hw_ = hw>
-    typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type opSends(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1, ED exdesc, D desc);
+    typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type opSends(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1, ED exdesc, D desc);
     template <typename D, HW hw_ = hw>
-    typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type opSends(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1, uint32_t exdesc, D desc);
+    typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type opSends(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1, uint32_t exdesc, D desc);
     template <typename D, HW hw_ = hw>
-    typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type opSends(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1, RegData exdesc, D desc);
+    typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type opSends(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1, RegData exdesc, D desc);
 
     template <HW hw_ = hw>
-    typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type opBranch(Opcode op, const InstructionModifier &mod, const RegData &dst, int32_t jip, int32_t uip);
+    typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type opBranch(Opcode op, const InstructionModifier &mod, const RegData &dst, int32_t jip, int32_t uip);
     template <HW hw_ = hw>
-    typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type opBranch(Opcode op, const InstructionModifier &mod, const RegData &dst, int32_t jip, int32_t uip);
+    typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type opBranch(Opcode op, const InstructionModifier &mod, const RegData &dst, int32_t jip, int32_t uip);
     template <bool forceWE = false, HW hw_ = hw>
-    typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type opBranch(Opcode op, const InstructionModifier &mod, const RegData &dst, int32_t jip);
+    typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type opBranch(Opcode op, const InstructionModifier &mod, const RegData &dst, int32_t jip);
     template <bool forceWE = false, HW hw_ = hw>
-    typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type opBranch(Opcode op, const InstructionModifier &mod, const RegData &dst, int32_t jip);
+    typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type opBranch(Opcode op, const InstructionModifier &mod, const RegData &dst, int32_t jip);
     template <bool forceWE = false, bool small12 = true, HW hw_ = hw>
-    typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type opBranch(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0);
+    typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type opBranch(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0);
     template <bool forceWE = false, bool small12 = true, HW hw_ = hw>
-    typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type opBranch(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0);
+    typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type opBranch(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0);
 
     void opBranch(Opcode op, const InstructionModifier &mod, const RegData &dst, Label &jip, Label &uip);
     template <bool forceWE = false>
@@ -259,13 +265,13 @@ private:
     void opCall(Opcode op, const InstructionModifier &mod, const RegData &dst, Label &jip);
 
     template <HW hw_ = hw>
-    typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type opJmpi(Opcode op, const InstructionModifier &mod, const RegData &dst, RegData src0, uint32_t jip);
+    typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type opJmpi(Opcode op, const InstructionModifier &mod, const RegData &dst, RegData src0, uint32_t jip);
     template <HW hw_ = hw>
-    typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type opJmpi(Opcode op, const InstructionModifier &mod, const RegData &dst, RegData src0, uint32_t jip);
+    typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type opJmpi(Opcode op, const InstructionModifier &mod, const RegData &dst, RegData src0, uint32_t jip);
     void opJmpi(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0, Label &jip);
 
     void opSync(Opcode op, SyncFunction fc, const InstructionModifier &mod);
-    void opSync(Opcode op, SyncFunction fc, const InstructionModifier &mod, const RegData &src0);
+    void opSync(Opcode op, SyncFunction fc, const InstructionModifier &mod, RegData src0);
     void opSync(Opcode op, SyncFunction fc, const InstructionModifier &mod, const Immediate &src0);
 
     void opNop(Opcode op);
@@ -275,7 +281,7 @@ private:
 #include "ngen_compiler_fix.hpp"
 
 public:
-    BinaryCodeGenerator() : defaultModifier{}, labelManager{}, sync{this} {
+    BinaryCodeGenerator() : defaultModifier{}, labelManager{}, sync{this}, load{this}, store{this}, atomic{this} {
         _workaround_();
         pushStream(rootStream);
     }
@@ -289,8 +295,10 @@ public:
 
 protected:
     // Configuration.
-    void setDefaultAutoSWSB(bool def = true)        { defaultModifier.setAutoSWSB(def); }
     void setDefaultNoMask(bool def = true)          { defaultModifier.setWrEn(def); }
+    void setDefaultAutoSWSB(bool def = true)        { defaultModifier.setAutoSWSB(def); }
+    bool getDefaultNoMask() const                   { return defaultModifier.isWrEn(); }
+    bool getDefaultAutoSWSB() const                 { return defaultModifier.isAutoSWSB(); }
 
     // Stream handling.
     void pushStream()                               { pushStream(new InstructionStream()); }
@@ -335,11 +343,11 @@ protected:
     }
     template <typename DT = void>
     void and_(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1) {
-        opX(isGen12 ? Opcode::and_gen12 : Opcode::and_, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::and_xe : Opcode::and_, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void and_(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const Immediate &src1) {
-        opX(isGen12 ? Opcode::and_gen12 : Opcode::and_, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::and_xe : Opcode::and_, getDataType<DT>(), mod, dst, src0, src1);
     }
 #ifndef NGEN_NO_OP_NAMES
     template <typename DT = void>
@@ -353,11 +361,11 @@ protected:
 #endif
     template <typename DT = void>
     void asr(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1) {
-        opX(isGen12 ? Opcode::asr_gen12 : Opcode::asr, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::asr_xe : Opcode::asr, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void asr(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const Immediate &src1) {
-        opX(isGen12 ? Opcode::asr_gen12 : Opcode::asr, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::asr_xe : Opcode::asr, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void avg(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1) {
@@ -369,49 +377,65 @@ protected:
     }
     template <typename DT = void>
     void bfe(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1, const RegData &src2) {
-        opX(isGen12 ? Opcode::bfe_gen12 : Opcode::bfe, getDataType<DT>(), mod, dst, src0, src1, src2);
+        opX(isXe ? Opcode::bfe_xe : Opcode::bfe, getDataType<DT>(), mod, dst, src0, src1, src2);
+    }
+    template <typename DT = void>
+    void bfe(const InstructionModifier &mod, const RegData &dst, const Immediate &src0, const RegData &src1, const RegData &src2) {
+        opX(isXe ? Opcode::bfe_xe : Opcode::bfe, getDataType<DT>(), mod, dst, src0, src1, src2);
+    }
+    template <typename DT = void>
+    void bfe(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1, const Immediate &src2) {
+        opX(isXe ? Opcode::bfe_xe : Opcode::bfe, getDataType<DT>(), mod, dst, src0, src1, src2);
+    }
+    template <typename DT = void>
+    void bfe(const InstructionModifier &mod, const RegData &dst, const Immediate &src0, const RegData &src1, const Immediate &src2) {
+        opX(isXe ? Opcode::bfe_xe : Opcode::bfe, getDataType<DT>(), mod, dst, src0, src1, src2);
     }
     template <typename DT = void>
     void bfi1(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1) {
-        opX(isGen12 ? Opcode::bfi1_gen12 : Opcode::bfi1, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::bfi1_xe : Opcode::bfi1, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void bfi1(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const Immediate &src1) {
-        opX(isGen12 ? Opcode::bfi1_gen12 : Opcode::bfi1, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::bfi1_xe : Opcode::bfi1, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void bfi2(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1, const RegData &src2) {
-        opX(isGen12 ? Opcode::bfi2_gen12 : Opcode::bfi2, getDataType<DT>(), mod, dst, src0, src1, src2);
+        opX(isXe ? Opcode::bfi2_xe : Opcode::bfi2, getDataType<DT>(), mod, dst, src0, src1, src2);
     }
     template <typename DT = void>
     void bfi2(const InstructionModifier &mod, const RegData &dst, const Immediate &src0, const RegData &src1, const RegData &src2) {
-        opX(isGen12 ? Opcode::bfi2_gen12 : Opcode::bfi2, getDataType<DT>(), mod, dst, src0, src1, src2);
+        opX(isXe ? Opcode::bfi2_xe : Opcode::bfi2, getDataType<DT>(), mod, dst, src0, src1, src2);
     }
     template <typename DT = void>
     void bfi2(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1, const Immediate &src2) {
-        opX(isGen12 ? Opcode::bfi2_gen12 : Opcode::bfi2, getDataType<DT>(), mod, dst, src0, src1, src2);
+        opX(isXe ? Opcode::bfi2_xe : Opcode::bfi2, getDataType<DT>(), mod, dst, src0, src1, src2);
+    }
+    template <typename DT = void>
+    void bfi2(const InstructionModifier &mod, const RegData &dst, const Immediate &src0, const RegData &src1, const Immediate &src2) {
+        opX(isXe ? Opcode::bfi2_xe : Opcode::bfi2, getDataType<DT>(), mod, dst, src0, src1, src2);
     }
     template <typename DT = void>
     void bfrev(const InstructionModifier &mod, const RegData &dst, const RegData &src0) {
-        opX(isGen12 ? Opcode::bfrev_gen12 : Opcode::bfrev, getDataType<DT>(), mod, dst, src0);
+        opX(isXe ? Opcode::bfrev_xe : Opcode::bfrev, getDataType<DT>(), mod, dst, src0);
     }
     template <typename DT = void>
     void bfrev(const InstructionModifier &mod, const RegData &dst, const Immediate &src0) {
-        opX(isGen12 ? Opcode::bfrev_gen12 : Opcode::bfrev, getDataType<DT>(), mod, dst, src0);
+        opX(isXe ? Opcode::bfrev_xe : Opcode::bfrev, getDataType<DT>(), mod, dst, src0);
     }
     void brc(const InstructionModifier &mod, Label &jip, Label &uip) {
-        opBranch(Opcode::brc, mod, isGen12 ? null.ud() : ip.d(), jip, uip);
+        opBranch(Opcode::brc, mod, isXe ? null.ud() : ip.d(), jip, uip);
     }
     void brc(const InstructionModifier &mod, RegData src0) {
         src0.setRegion(2, 2, 1);
-        opBranch<true, true>(Opcode::brc, mod, isGen12 ? null.ud() : ip.d(), src0);
+        opBranch<true, true>(Opcode::brc, mod, isXe ? null.ud() : ip.d(), src0);
     }
     void brd(const InstructionModifier &mod, Label &jip) {
-        opBranch(Opcode::brd, mod, isGen12 ? null.ud() : ip.d(), jip);
+        opBranch(Opcode::brd, mod, isXe ? null.ud() : ip.d(), jip);
     }
     void brd(const InstructionModifier &mod, RegData src0) {
         src0.setRegion(2, 2, 1);
-        opBranch<true, true>(Opcode::brd, mod, isGen12 ? null.ud() : ip.d(), src0);
+        opBranch<true, true>(Opcode::brd, mod, isXe ? null.ud() : ip.d(), src0);
     }
     void break_(const InstructionModifier &mod, Label &jip, Label &uip) {
         opBranch(Opcode::break_, mod, null, jip, uip);
@@ -420,7 +444,7 @@ protected:
         opCall(Opcode::call, mod, dst, jip);
     }
     void call(const InstructionModifier &mod, const RegData &dst, RegData jip) {
-        if (isGen12)
+        if (isXe)
             opBranch<true, true>(Opcode::call, mod, dst, jip);
         else {
             jip.setRegion(0, 1, 0);
@@ -428,13 +452,13 @@ protected:
         }
     }
     void calla(const InstructionModifier &mod, const RegData &dst, int32_t jip) {
-        if (isGen12)
+        if (isXe)
             opBranch<true>(Opcode::calla, mod, dst, jip);
         else
             opX<true>(Opcode::calla, DataType::d, mod, dst, (hw <= HW::Gen9) ? null.ud(0)(2,2,1) : null.ud(0)(0,1,0), Immediate::d(jip));
     }
     void calla(const InstructionModifier &mod, const RegData &dst, RegData jip) {
-        if (isGen12)
+        if (isXe)
             opBranch<true, true>(Opcode::calla, mod, dst, jip);
         else {
             jip.setRegion(0, 1, 0);
@@ -451,19 +475,31 @@ protected:
     }
     template <typename DT = void>
     void cmp(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1) {
-        opX(isGen12 ? Opcode::cmp_gen12 : Opcode::cmp, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::cmp_xe : Opcode::cmp, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void cmp(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const Immediate &src1) {
-        opX(isGen12 ? Opcode::cmp_gen12 : Opcode::cmp, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::cmp_xe : Opcode::cmp, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void cmpn(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1) {
-        opX(isGen12 ? Opcode::cmpn_gen12 : Opcode::cmpn, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::cmpn_xe : Opcode::cmpn, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void csel(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1, const RegData &src2) {
-        opX(isGen12 ? Opcode::csel_gen12 : Opcode::csel, getDataType<DT>(), mod, dst, src0, src1, src2);
+        opX(isXe ? Opcode::csel_xe : Opcode::csel, getDataType<DT>(), mod, dst, src0, src1, src2);
+    }
+    template <typename DT = void>
+    void csel(const InstructionModifier &mod, const RegData &dst, const Immediate &src0, const RegData &src1, const RegData &src2) {
+        opX(isXe ? Opcode::csel_xe : Opcode::csel, getDataType<DT>(), mod, dst, src0, src1, src2);
+    }
+    template <typename DT = void>
+    void csel(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1, const Immediate &src2) {
+        opX(isXe ? Opcode::csel_xe : Opcode::csel, getDataType<DT>(), mod, dst, src0, src1, src2);
+    }
+    template <typename DT = void>
+    void csel(const InstructionModifier &mod, const RegData &dst, const Immediate &src0, const RegData &src1, const Immediate &src2) {
+        opX(isXe ? Opcode::csel_xe : Opcode::csel, getDataType<DT>(), mod, dst, src0, src1, src2);
     }
     void cont(const InstructionModifier &mod, Label &jip, Label &uip) {
         opBranch(Opcode::cont, mod, null, jip, uip);
@@ -494,17 +530,22 @@ protected:
     }
     template <typename DT = void>
     void dp4a(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1, const RegData &src2) {
-        if (hw < HW::Gen12LP) unsupported();
+        if (hw < HW::Xe_LP) unsupported();
         opX(Opcode::dp4a, getDataType<DT>(), mod, dst, src0, src1, src2);
     }
     template <typename DT = void>
     void dp4a(const InstructionModifier &mod, const RegData &dst, const Immediate &src0, const RegData &src1, const RegData &src2) {
-        if (hw < HW::Gen12LP) unsupported();
+        if (hw < HW::Xe_LP) unsupported();
         opX(Opcode::dp4a, getDataType<DT>(), mod, dst, src0, src1, src2);
     }
     template <typename DT = void>
     void dp4a(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1, const Immediate &src2) {
-        if (hw < HW::Gen12LP) unsupported();
+        if (hw < HW::Xe_LP) unsupported();
+        opX(Opcode::dp4a, getDataType<DT>(), mod, dst, src0, src1, src2);
+    }
+    template <typename DT = void>
+    void dp4a(const InstructionModifier &mod, const RegData &dst, const Immediate &src0, const RegData &src1, const Immediate &src2) {
+        if (hw < HW::Xe_LP) unsupported();
         opX(Opcode::dp4a, getDataType<DT>(), mod, dst, src0, src1, src2);
     }
     template <typename DT = void>
@@ -578,15 +619,15 @@ protected:
         opBranch(Opcode::join, mod, null, sizeof(Instruction8));
     }
     void jmpi(const InstructionModifier &mod, Label &jip) {
-        auto dst = isGen12 ? ARF(null) : ARF(ip);
+        auto dst = isXe ? ARF(null) : ARF(ip);
         opJmpi(Opcode::jmpi, mod, dst, dst, jip);
     }
     void jmpi(const InstructionModifier &mod, const RegData &jip) {
 #ifdef NGEN_SAFE
-        if (!isGen12 && jip.getType() != DataType::d && jip.getType() != DataType::invalid)
+        if (!isXe && jip.getType() != DataType::d && jip.getType() != DataType::invalid)
             throw invalid_type_exception();
 #endif
-        if (isGen12)
+        if (isXe)
             opBranch<true, false>(Opcode::jmpi, mod, null, jip);
         else
             opX(Opcode::jmpi, DataType::d, mod, ip, ip, jip);
@@ -653,6 +694,10 @@ protected:
     }
     template <typename DT = void>
     void mad(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1, const Immediate &src2) {
+        opX(Opcode::mad, getDataType<DT>(), mod, dst, src0, src1, src2);
+    }
+    template <typename DT = void>
+    void mad(const InstructionModifier &mod, const RegData &dst, const Immediate &src0, const RegData &src1, const Immediate &src2) {
         opX(Opcode::mad, getDataType<DT>(), mod, dst, src0, src1, src2);
     }
     template <typename DT = void, HW hw_ = hw>
@@ -733,15 +778,15 @@ protected:
     }
     template <typename DT = void>
     void mov(const InstructionModifier &mod, const RegData &dst, const RegData &src0) {
-        opX(isGen12 ? Opcode::mov_gen12 : Opcode::mov, getDataType<DT>(), mod, dst, src0);
+        opX(isXe ? Opcode::mov_xe : Opcode::mov, getDataType<DT>(), mod, dst, src0);
     }
     template <typename DT = void>
     void mov(const InstructionModifier &mod, const RegData &dst, const Immediate &src0) {
-        opX(isGen12 ? Opcode::mov_gen12 : Opcode::mov, getDataType<DT>(), mod, dst, src0);
+        opX(isXe ? Opcode::mov_xe : Opcode::mov, getDataType<DT>(), mod, dst, src0);
     }
     template <typename DT = void>
     void movi(const InstructionModifier &mod, const RegData &dst, const RegData &src0) {
-        opX(isGen12 ? Opcode::movi_gen12 : Opcode::movi, getDataType<DT>(), mod, dst, src0);
+        opX(isXe ? Opcode::movi_xe : Opcode::movi, getDataType<DT>(), mod, dst, src0);
     }
     template <typename DT = void>
     void mul(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1) {
@@ -754,18 +799,18 @@ protected:
         opX(Opcode::mul, getDataType<DT>(), mod, dst, src0, src1);
     }
     void nop() {
-        opNop(isGen12 ? Opcode::nop_gen12 : Opcode::nop);
+        opNop(isXe ? Opcode::nop_xe : Opcode::nop);
     }
     void nop(const InstructionModifier &mod) {
-        opX(isGen12 ? Opcode::nop_gen12 : Opcode::nop, DataType::invalid, mod, null, null, null);
+        opX(isXe ? Opcode::nop_xe : Opcode::nop, DataType::invalid, mod, null, null, null);
     }
     template <typename DT = void>
     void not_(const InstructionModifier &mod, const RegData &dst, const RegData &src0) {
-        opX(isGen12 ? Opcode::not_gen12 : Opcode::not_, getDataType<DT>(), mod, dst, src0);
+        opX(isXe ? Opcode::not_xe : Opcode::not_, getDataType<DT>(), mod, dst, src0);
     }
     template <typename DT = void>
     void not_(const InstructionModifier &mod, const RegData &dst, const Immediate &src0) {
-        opX(isGen12 ? Opcode::not_gen12 : Opcode::not_, getDataType<DT>(), mod, dst, src0);
+        opX(isXe ? Opcode::not_xe : Opcode::not_, getDataType<DT>(), mod, dst, src0);
     }
 #ifndef NGEN_NO_OP_NAMES
     template <typename DT = void>
@@ -779,11 +824,11 @@ protected:
 #endif
     template <typename DT = void>
     void or_(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1) {
-        opX(isGen12 ? Opcode::or_gen12 : Opcode::or_, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::or_xe : Opcode::or_, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void or_(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const Immediate &src1) {
-        opX(isGen12 ? Opcode::or_gen12 : Opcode::or_, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::or_xe : Opcode::or_, getDataType<DT>(), mod, dst, src0, src1);
     }
 #ifndef NGEN_NO_OP_NAMES
     template <typename DT = void>
@@ -802,7 +847,7 @@ protected:
     }
     void ret(const InstructionModifier &mod, RegData src0) {
         src0.setRegion(2,2,1);
-        if (isGen12)
+        if (isXe)
             opBranch<true, true>(Opcode::ret, mod, null, src0);
         else
             opX<true>(Opcode::ret, DataType::ud, mod, null, src0);
@@ -841,50 +886,50 @@ protected:
     }
     template <typename DT = void>
     void rol(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1) {
-        opX(isGen12 ? Opcode::rol_gen12 : Opcode::rol, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::rol_xe : Opcode::rol, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void rol(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const Immediate &src1) {
-        opX(isGen12 ? Opcode::rol_gen12 : Opcode::rol, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::rol_xe : Opcode::rol, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void ror(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1) {
-        opX(isGen12 ? Opcode::ror_gen12 : Opcode::ror, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::ror_xe : Opcode::ror, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void ror(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const Immediate &src1) {
-        opX(isGen12 ? Opcode::ror_gen12 : Opcode::ror, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::ror_xe : Opcode::ror, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void sad2(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1) {
-        if (hw >= HW::Gen12LP) unsupported();
+        if (hw >= HW::Xe_LP) unsupported();
         opX(Opcode::sad2, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void sad2(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const Immediate &src1) {
-        if (hw >= HW::Gen12LP) unsupported();
+        if (hw >= HW::Xe_LP) unsupported();
         opX(Opcode::sad2, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void sada2(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1) {
-        if (hw >= HW::Gen12LP) unsupported();
+        if (hw >= HW::Xe_LP) unsupported();
         opX(Opcode::sada2, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void sada2(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const Immediate &src1) {
-        if (hw >= HW::Gen12LP) unsupported();
+        if (hw >= HW::Xe_LP) unsupported();
         opX(Opcode::sada2, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void sel(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1) {
-        opX(isGen12 ? Opcode::sel_gen12 : Opcode::sel, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::sel_xe : Opcode::sel, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void sel(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const Immediate &src1) {
-        opX(isGen12 ? Opcode::sel_gen12 : Opcode::sel, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::sel_xe : Opcode::sel, getDataType<DT>(), mod, dst, src0, src1);
     }
 
-    /* Gen12-style sends */
+    /* Xe-style sends */
     void send(const InstructionModifier &mod, SharedFunction sf, const RegData &dst, const RegData &src0, const RegData &src1, uint32_t exdesc, uint32_t desc) {
         opSend(Opcode::send, mod, sf, dst, src0, src1, exdesc, desc);
     }
@@ -909,7 +954,7 @@ protected:
     void sendc(const InstructionModifier &mod, SharedFunction sf, const RegData &dst, const RegData &src0, const RegData &src1, const RegData &exdesc, const RegData &desc) {
         opSend(Opcode::sendc, mod, sf, dst, src0, src1, exdesc, desc);
     }
-    /* Pre-Gen12-style sends; also supported on Gen12. */
+    /* Pre-Xe-style sends; also supported on Xe. */
     void send(const InstructionModifier &mod, const RegData &dst, const RegData &src0, uint32_t exdesc, uint32_t desc) {
         opSend(Opcode::send, mod, dst, src0, exdesc, desc);
     }
@@ -949,23 +994,23 @@ protected:
 
     template <typename DT = void>
     void shl(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1) {
-        opX(isGen12 ? Opcode::shl_gen12 : Opcode::shl, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::shl_xe : Opcode::shl, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void shl(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const Immediate &src1) {
-        opX(isGen12 ? Opcode::shl_gen12 : Opcode::shl, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::shl_xe : Opcode::shl, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void shr(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1) {
-        opX(isGen12 ? Opcode::shr_gen12 : Opcode::shr, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::shr_xe : Opcode::shr, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void shr(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const Immediate &src1) {
-        opX(isGen12 ? Opcode::shr_gen12 : Opcode::shr, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::shr_xe : Opcode::shr, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void smov(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const Immediate &src1) {
-        opX(isGen12 ? Opcode::smov_gen12 : Opcode::smov, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::smov_xe : Opcode::smov, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void subb(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1) {
@@ -986,11 +1031,11 @@ protected:
     }
     template <typename DT = void>
     void xor_(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1) {
-        opX(isGen12 ? Opcode::xor_gen12 : Opcode::xor_, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::xor_xe : Opcode::xor_, getDataType<DT>(), mod, dst, src0, src1);
     }
     template <typename DT = void>
     void xor_(const InstructionModifier &mod, const RegData &dst, const RegData &src0, const Immediate &src1) {
-        opX(isGen12 ? Opcode::xor_gen12 : Opcode::xor_, getDataType<DT>(), mod, dst, src0, src1);
+        opX(isXe ? Opcode::xor_xe : Opcode::xor_, getDataType<DT>(), mod, dst, src0, src1);
     }
 #ifndef NGEN_NO_OP_NAMES
     template <typename DT = void>
@@ -1024,6 +1069,12 @@ private:
         void operator()(SyncFunction fc, const InstructionModifier &mod, uint32_t src0) {
             parent.opSync(Opcode::sync, fc, mod, Immediate::ud(src0));
         }
+        void allrd() {
+            allrd(null.ud(0)(0, 1, 1));
+        }
+        void allrd(const InstructionModifier &mod) {
+            allrd(mod, null.ud(0)(0, 1, 1));
+        }
         void allrd(const RegData &src0) {
             allrd(InstructionModifier(), src0);
         }
@@ -1035,6 +1086,12 @@ private:
         }
         void allrd(const InstructionModifier &mod, uint32_t src0) {
             this->operator()(SyncFunction::allrd, mod, src0);
+        }
+        void allwr() {
+            allwr(null);
+        }
+        void allwr(const InstructionModifier &mod) {
+            allwr(mod, null);
         }
         void allwr(const RegData &src0) {
             allwr(InstructionModifier(), src0);
@@ -1061,12 +1118,77 @@ private:
 public:
     Sync sync;
 
+
+private:
+    struct Load {
+        BinaryCodeGenerator<hw> &parent;
+
+        Load(BinaryCodeGenerator<hw> *parent_) : parent(*parent_) {}
+
+        template <typename DataSpec>
+        void operator()(const InstructionModifier &mod, const RegData &dst, const DataSpec &spec, AddressBase base, const RegData &addr)
+        {
+            MessageDescriptor desc;
+            ExtendedMessageDescriptor exdesc;
+
+            encodeLoadDescriptors(hw, desc, exdesc, mod, dst, spec, base, addr);
+            parent.send(mod, dst, addr, exdesc.all, desc.all);
+        }
+
+    };
+
+    struct Store {
+        BinaryCodeGenerator<hw> &parent;
+
+        Store(BinaryCodeGenerator<hw> *parent_) : parent(*parent_) {}
+
+        template <typename DataSpec>
+        void operator()(const InstructionModifier &mod, const DataSpec &spec, AddressBase base, const RegData &addr, const RegData &data)
+        {
+            MessageDescriptor desc;
+            ExtendedMessageDescriptor exdesc;
+
+            encodeStoreDescriptors(hw, desc, exdesc, mod, spec, base, addr);
+            parent.sends(mod, NullRegister(), addr, data, exdesc.all, desc.all);
+        }
+
+    };
+
+    struct Atomic_ {
+        BinaryCodeGenerator<hw> &parent;
+
+        Atomic_(BinaryCodeGenerator<hw> *parent_) : parent(*parent_) {}
+
+        template <typename DataSpec>
+        void operator()(AtomicOp op, const InstructionModifier &mod, const RegData &dst, const DataSpec &spec, AddressBase base, const RegData &addr, const RegData &data = NullRegister())
+        {
+            MessageDescriptor desc;
+            ExtendedMessageDescriptor exdesc;
+
+            encodeAtomicDescriptors(hw, desc, exdesc, op, mod, dst, spec, base, addr);
+            if (data.isNull())
+                parent.send(mod, dst, addr, exdesc.all, desc.all);
+            else
+                parent.sends(mod, dst, addr, data, exdesc.all, desc.all);
+        }
+        template <typename DataSpec>
+        void operator()(AtomicOp op, const InstructionModifier &mod, const DataSpec &spec, AddressBase base, const RegData &addr, const RegData &data = NullRegister())
+        {
+            (*this)(op, mod, NullRegister(), spec, base, addr, data);
+        }
+
+    };
+public:
+    Load load;
+    Store store;
+    Atomic_ atomic;
+
 #include "ngen_pseudo.hpp"
 };
 
 #define NGEN_FORWARD(hw) \
 using InstructionStream = typename ngen::BinaryCodeGenerator<hw>::InstructionStream; \
-using ngen::BinaryCodeGenerator<hw>::isGen12; \
+using ngen::BinaryCodeGenerator<hw>::isXe; \
 template <typename DT = void, typename... Targs> void add(Targs&&... args) { ngen::BinaryCodeGenerator<hw>::template add<DT>(std::forward<Targs>(args)...); } \
 template <typename DT = void, typename... Targs> void addc(Targs&&... args) { ngen::BinaryCodeGenerator<hw>::template addc<DT>(std::forward<Targs>(args)...); } \
 template <typename DT = void, typename... Targs> void and_(Targs&&... args) { ngen::BinaryCodeGenerator<hw>::template and_<DT>(std::forward<Targs>(args)...); } \
@@ -1164,9 +1286,9 @@ template <typename... Targs> void barriermsg(Targs&&... args) { ngen::BinaryCode
 template <typename... Targs> void barriersignal(Targs&&... args) { ngen::BinaryCodeGenerator<hw>::barriersignal(std::forward<Targs>(args)...); } \
 template <typename... Targs> void barrierwait(Targs&&... args) { ngen::BinaryCodeGenerator<hw>::barrierwait(std::forward<Targs>(args)...); } \
 template <typename... Targs> void barrier(Targs&&... args) { ngen::BinaryCodeGenerator<hw>::barrier(std::forward<Targs>(args)...); } \
-template <typename... Targs> void load(Targs&&... args) { ngen::BinaryCodeGenerator<hw>::load(std::forward<Targs>(args)...); } \
-template <typename... Targs> void store(Targs&&... args) { ngen::BinaryCodeGenerator<hw>::store(std::forward<Targs>(args)...); } \
-template <typename... Targs> void atomic(Targs&&... args) { ngen::BinaryCodeGenerator<hw>::atomic(std::forward<Targs>(args)...); } \
+using ngen::BinaryCodeGenerator<hw>::load; \
+using ngen::BinaryCodeGenerator<hw>::store; \
+using ngen::BinaryCodeGenerator<hw>::atomic; \
 template <typename... Targs> void memfence(Targs&&... args) { ngen::BinaryCodeGenerator<hw>::memfence(std::forward<Targs>(args)...); } \
 template <typename... Targs> void slmfence(Targs&&... args) { ngen::BinaryCodeGenerator<hw>::slmfence(std::forward<Targs>(args)...); } \
 template <typename... Targs> void pushStream(Targs&&... args) { ngen::BinaryCodeGenerator<hw>::pushStream(std::forward<Targs>(args)...); } \
@@ -1178,6 +1300,8 @@ template <typename... Targs> void mark(Targs&&... args) { ngen::BinaryCodeGenera
 template <typename... Targs> void comment(Targs&&... args) { ngen::BinaryCodeGenerator<hw>::comment(std::forward<Targs>(args)...); } \
 template <typename... Targs> void setDefaultNoMask(Targs&&... args) { ngen::BinaryCodeGenerator<hw>::setDefaultNoMask(std::forward<Targs>(args)...); } \
 template <typename... Targs> void setDefaultAutoSWSB(Targs&&... args) { ngen::BinaryCodeGenerator<hw>::setDefaultAutoSWSB(std::forward<Targs>(args)...); } \
+bool getDefaultNoMask() { return ngen::BinaryCodeGenerator<hw>::getDefaultNoMask(); } \
+bool getDefaultAutoSWSB() { return ngen::BinaryCodeGenerator<hw>::getDefaultAutoSWSB(); } \
 NGEN_FORWARD_EXTRA \
 NGEN_FORWARD_OP_NAMES \
 NGEN_FORWARD_MIN_MAX \
@@ -1252,7 +1376,9 @@ using ngen::BinaryCodeGenerator<hw>::noacc; using ngen::BinaryCodeGenerator<hw>:
 using ngen::BinaryCodeGenerator<hw>::f0; using ngen::BinaryCodeGenerator<hw>::f1; \
 using ngen::BinaryCodeGenerator<hw>::ce0; using ngen::BinaryCodeGenerator<hw>::sp; using ngen::BinaryCodeGenerator<hw>::sr0; using ngen::BinaryCodeGenerator<hw>::sr1; \
 using ngen::BinaryCodeGenerator<hw>::cr0; using ngen::BinaryCodeGenerator<hw>::n0; using ngen::BinaryCodeGenerator<hw>::ip; using ngen::BinaryCodeGenerator<hw>::tdr0; \
-using ngen::BinaryCodeGenerator<hw>::tm0; using ngen::BinaryCodeGenerator<hw>::pm0; using ngen::BinaryCodeGenerator<hw>::tp0; using ngen::BinaryCodeGenerator<hw>::dbg0; \
+using ngen::BinaryCodeGenerator<hw>::tm0; using ngen::BinaryCodeGenerator<hw>::tm1; using ngen::BinaryCodeGenerator<hw>::tm2; using ngen::BinaryCodeGenerator<hw>::tm3; \
+using ngen::BinaryCodeGenerator<hw>::tm4; using ngen::BinaryCodeGenerator<hw>::pm0; using ngen::BinaryCodeGenerator<hw>::tp0; using ngen::BinaryCodeGenerator<hw>::dbg0; \
+using ngen::BinaryCodeGenerator<hw>::fc0; using ngen::BinaryCodeGenerator<hw>::fc1; using ngen::BinaryCodeGenerator<hw>::fc2; using ngen::BinaryCodeGenerator<hw>::fc3; \
 using ngen::BinaryCodeGenerator<hw>::NoDDClr; using ngen::BinaryCodeGenerator<hw>::NoDDChk; \
 using ngen::BinaryCodeGenerator<hw>::AccWrEn; using ngen::BinaryCodeGenerator<hw>::NoSrcDepSet; using ngen::BinaryCodeGenerator<hw>::Breakpoint; using ngen::BinaryCodeGenerator<hw>::sat; \
 using ngen::BinaryCodeGenerator<hw>::NoMask; \
@@ -1277,8 +1403,10 @@ template <typename... Targs> ngen::InstructionModifier ExecutionOffset(Targs&&..
 template <typename... Targs> ngen::AddressBase Surface(Targs&&... args) { return ngen::BinaryCodeGenerator<hw>::Surface(std::forward<Targs>(args)...); } \
 template <typename... Targs> ngen::AddressBase CC(Targs&&... args) { return ngen::BinaryCodeGenerator<hw>::CC(std::forward<Targs>(args)...); } \
 template <typename... Targs> ngen::AddressBase SC(Targs&&... args) { return ngen::BinaryCodeGenerator<hw>::SC(std::forward<Targs>(args)...); }
-#define NGEN_FORWARD_REGISTERS_EXTRA
-#define NGEN_FORWARD_REGISTERS NGEN_FORWARD_REGISTERS_BASE NGEN_FORWARD_REGISTERS_EXTRA
+#define NGEN_FORWARD_REGISTERS_EXTRA1
+#define NGEN_FORWARD_REGISTERS_EXTRA2
+#define NGEN_FORWARD_REGISTERS_EXTRA3
+#define NGEN_FORWARD_REGISTERS NGEN_FORWARD_REGISTERS_BASE NGEN_FORWARD_REGISTERS_EXTRA1 NGEN_FORWARD_REGISTERS_EXTRA2 NGEN_FORWARD_REGISTERS_EXTRA3
 #endif
 
 template <HW hw>
@@ -1301,12 +1429,13 @@ typename BinaryCodeGenerator<hw>::InstructionStream *BinaryCodeGenerator<hw>::po
     return result;
 }
 
+template <HW hw>
 static inline Instruction12 encodeSyncInsertion(autoswsb::SyncInsertion &si)
 {
     Instruction12 i;
 
     i.common.opcode = static_cast<int>(Opcode::sync);
-    i.common.swsb = si.swsb;
+    i.common.swsb = SWSBInfo12(si.swsb, Opcode::sync).raw();
     i.common.maskCtrl = true;
     i.binary.cmod = static_cast<int>(si.fc);
 
@@ -1350,7 +1479,7 @@ std::vector<uint8_t> BinaryCodeGenerator<hw>::getCode()
 
         for (uint32_t isrc = 0; isrc < program.size(); isrc++) {
             while ((nextSync != syncs.end()) && (nextSync->second->inum == isrc))
-                *pdst++ = encodeSyncInsertion(*(nextSync++)->second);
+                *pdst++ = encodeSyncInsertion<hw>(*(nextSync++)->second);
             *pdst++ = *psrc++;
         }
     }
@@ -1360,7 +1489,7 @@ std::vector<uint8_t> BinaryCodeGenerator<hw>::getCode()
 
 template <HW hw>
 template <bool forceWE, typename D, typename S0, HW hw_>
-typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0)
 {
     Instruction8 i{};
@@ -1391,9 +1520,10 @@ BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionM
 
 template <HW hw>
 template <bool forceWE, typename D, typename S0, HW hw_>
-typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0)
 {
+    typename EncodingTag12Dispatch<hw>::tag tag;
     Instruction12 i{};
 
     InstructionModifier emod = mod | defaultModifier;
@@ -1403,10 +1533,10 @@ BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionM
     dst.fixup(emod.getExecSize(), defaultType, true, 1);
     src0.fixup(emod.getExecSize(), defaultType, false, 1);
 
-    encodeCommon12(i, op, emod);
+    encodeCommon12(i, op, emod, dst, tag);
 
-    i.binary.dst  = encodeBinaryOperand12<true>(dst).bits;
-    i.binary.src0 = encodeBinaryOperand12<false>(src0).bits;
+    i.binary.dst  = encodeBinaryOperand12<true>(dst, tag).bits;
+    i.binary.src0 = encodeBinaryOperand12<false>(src0, tag).bits;
 
     i.binary.dstAddrMode = dst.isIndirect();
     i.binary.dstType  = getTypecode12(dst.getType());
@@ -1421,7 +1551,7 @@ BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionM
 
 template <HW hw>
 template <bool forceWE, typename D, HW hw_>
-typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, const Immediate &src0)
 {
     Instruction8 i{};
@@ -1455,9 +1585,10 @@ BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionM
 
 template <HW hw>
 template <bool forceWE, typename D, HW hw_>
-typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, const Immediate &src0)
 {
+    typename EncodingTag12Dispatch<hw>::tag tag;
     Instruction12 i{};
 
     InstructionModifier emod = mod | defaultModifier;
@@ -1467,9 +1598,9 @@ BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionM
     dst.fixup(emod.getExecSize(), defaultType, true, 1);
     src0.fixup(emod.getExecSize(), defaultType, false, 1);
 
-    encodeCommon12(i, op, emod);
+    encodeCommon12(i, op, emod, dst, tag);
 
-    i.binary.dst = encodeBinaryOperand12<true>(dst).bits;
+    i.binary.dst = encodeBinaryOperand12<true>(dst, tag).bits;
 
     i.binary.dstAddrMode = dst.isIndirect();
 
@@ -1494,7 +1625,7 @@ BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionM
 
 template <HW hw>
 template <bool forceWE, typename D, typename S0, typename S1, HW hw_>
-typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0, S1 src1)
 {
     Instruction8 i{};
@@ -1527,7 +1658,7 @@ BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionM
     i.binary.src1RegFile = RegFileGRF;
 
 #ifdef NGEN_SAFE
-    if (src1.isARF()) throw grf_expected_exception();
+    if (src1.isARF() && op != Opcode::illegal) throw grf_expected_exception();
 #endif
 
     db(i);
@@ -1535,9 +1666,10 @@ BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionM
 
 template <HW hw>
 template <bool forceWE, typename D, typename S0, typename S1, HW hw_>
-typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0, S1 src1)
 {
+    typename EncodingTag12Dispatch<hw>::tag tag;
     Instruction12 i{};
 
     InstructionModifier emod = mod | defaultModifier;
@@ -1548,11 +1680,11 @@ BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionM
     src0.fixup(emod.getExecSize(), defaultType, false, 2);
     src1.fixup(emod.getExecSize(), defaultType, false, 2);
 
-    encodeCommon12(i, op, emod);
+    encodeCommon12(i, op, emod, dst, tag);
 
-    i.binary.dst  = encodeBinaryOperand12<true>(dst).bits;
-    i.binary.src0 = encodeBinaryOperand12<false>(src0).bits;
-    i.binary.src1 = encodeBinaryOperand12<false>(src1).bits;
+    i.binary.dst  = encodeBinaryOperand12<true>(dst, tag).bits;
+    i.binary.src0 = encodeBinaryOperand12<false>(src0, tag).bits;
+    i.binary.src1 = encodeBinaryOperand12<false>(src1, tag).bits;
 
     i.binary.dstAddrMode = dst.isIndirect();
     i.binary.dstType  = getTypecode12(dst.getType());
@@ -1569,7 +1701,7 @@ BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionM
 
 template <HW hw>
 template <bool forceWE, typename D, typename S0, HW hw_>
-typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0, const Immediate &src1)
 {
     Instruction8 i{};
@@ -1605,9 +1737,10 @@ BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionM
 
 template <HW hw>
 template <bool forceWE, typename D, typename S0, HW hw_>
-typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0, const Immediate &src1)
 {
+    typename EncodingTag12Dispatch<hw>::tag tag;
     Instruction12 i{};
 
     InstructionModifier emod = mod | defaultModifier;
@@ -1618,10 +1751,10 @@ BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionM
     src0.fixup(emod.getExecSize(), defaultType, false, 2);
     src1.fixup(emod.getExecSize(), defaultType, false, 2);
 
-    encodeCommon12(i, op, emod);
+    encodeCommon12(i, op, emod, dst, tag);
 
-    i.binary.dst  = encodeBinaryOperand12<true>(dst).bits;
-    i.binary.src0 = encodeBinaryOperand12<false>(src0).bits;
+    i.binary.dst  = encodeBinaryOperand12<true>(dst, tag).bits;
+    i.binary.src0 = encodeBinaryOperand12<false>(src0, tag).bits;
     i.binary.src1 = static_cast<uint64_t>(src1);
 
     i.binary.dstAddrMode = dst.isIndirect();
@@ -1651,7 +1784,7 @@ BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionM
 
 template <HW hw>
 template <HW hw_>
-typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionModifier &mod, Align16Operand dst, Align16Operand src0, Align16Operand src1, Align16Operand src2)
 {
 #ifdef NGEN_SAFE
@@ -1691,7 +1824,7 @@ BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionM
 
 template <HW hw>
 template <typename D, typename S0, typename S1, typename S2, HW hw_>
-typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0, S1 src1, S2 src2)
 {
     if (hw < HW::Gen10)
@@ -1724,11 +1857,11 @@ BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionM
 
 template <HW hw>
 template <typename D, typename S0,typename S1, typename S2, HW hw_>
-typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionModifier &mod, D dst, S0 src0, S1 src1, S2 src2)
 {
+    typename EncodingTag12Dispatch<hw>::tag tag;
     Instruction12 i{};
-
     InstructionModifier emod = mod | defaultModifier;
 
     dst.fixup(emod.getExecSize(), defaultType, true, 3);
@@ -1736,12 +1869,12 @@ BinaryCodeGenerator<hw>::opX(Opcode op, DataType defaultType, const InstructionM
     src1.fixup(emod.getExecSize(), defaultType, false, 3);
     src2.fixup(emod.getExecSize(), defaultType, false, 3);
 
-    encodeCommon12(i, op, emod);
+    encodeCommon12(i, op, emod, dst, tag);
 
-    i.ternary.dst  = encodeTernaryOperand12<true>(dst).bits;
-    encodeTernarySrc0(i, src0);
-    encodeTernarySrc1(i, src1);
-    encodeTernarySrc2(i, src2);
+    i.ternary.dst  = encodeTernaryOperand12<true>(dst, tag).bits;
+    encodeTernarySrc0(i, src0, tag);
+    encodeTernarySrc1(i, src1, tag);
+    encodeTernarySrc2(i, src2, tag);
     encodeTernaryTypes(i, dst, src0, src1, src2);
 
     i.ternary.cmod = static_cast<int>(mod.getCMod());
@@ -1771,7 +1904,7 @@ void BinaryCodeGenerator<hw>::opMath(Opcode op, DataType defaultType, const Inst
 
 template <HW hw>
 template <typename D, HW hw_>
-typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opSend(Opcode op, const InstructionModifier &mod, SharedFunction sfid, const RegData &dst, const RegData &src0, const RegData &src1, uint32_t exdesc, D desc)
 {
     exdesc |= uint32_t(static_cast<uint8_t>(sfid));
@@ -1780,7 +1913,7 @@ BinaryCodeGenerator<hw>::opSend(Opcode op, const InstructionModifier &mod, Share
 
 template <HW hw>
 template <typename D, HW hw_>
-typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opSend(Opcode op, const InstructionModifier &mod, SharedFunction sfid, const RegData &dst, const RegData &src0, const RegData &src1, const RegData &exdesc, D desc)
 {
     opSends(static_cast<Opcode>(static_cast<uint8_t>(op) | 2), mod, dst, src0, src1, exdesc, desc);
@@ -1788,14 +1921,14 @@ BinaryCodeGenerator<hw>::opSend(Opcode op, const InstructionModifier &mod, Share
 
 template <HW hw>
 template <typename ED, typename D, HW hw_>
-typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opSend(Opcode op, const InstructionModifier &mod, SharedFunction sfid, const RegData &dst, const RegData &src0, const RegData &src1, ED exdesc, D desc)
 {
+    typename EncodingTag12Dispatch<hw>::tag tag;
     Instruction12 i{};
-
     InstructionModifier emod = mod | defaultModifier;
 
-    encodeCommon12(i, op, emod);
+    encodeCommon12(i, op, emod, dst, tag);
 
     i.send.fusionCtrl = emod.isSerialized();
 
@@ -1807,7 +1940,7 @@ BinaryCodeGenerator<hw>::opSend(Opcode op, const InstructionModifier &mod, Share
     i.send.src0RegFile = getRegFile(src0);
     i.send.src1RegFile = getRegFile(src1);
 
-    i.send.sfid = static_cast<int>(sfid);
+    i.send.sfid = static_cast<int>(sfid) & 0xF;
 
     encodeSendDesc(i, desc);
     encodeSendExDesc(i, exdesc);
@@ -1817,7 +1950,7 @@ BinaryCodeGenerator<hw>::opSend(Opcode op, const InstructionModifier &mod, Share
 
 template <HW hw>
 template <HW hw_>
-typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opSend(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0, uint32_t exdesc, uint32_t desc)
 {
     Instruction8 i{};
@@ -1831,6 +1964,8 @@ BinaryCodeGenerator<hw>::opSend(Opcode op, const InstructionModifier &mod, const
     i.sendsGen9.dstRegFile = getRegFile(dst);
     i.binary.src0RegFile = getRegFile(src0);
     i.binary.src1RegFile = RegFileIMM;
+
+    i.binary.dstType = getTypecode<hw>(dst.getType());
 
     i.sendsGen9.sfid = exdesc & 0xF;
     i.sendGen8.zero = 0;
@@ -1848,7 +1983,7 @@ BinaryCodeGenerator<hw>::opSend(Opcode op, const InstructionModifier &mod, const
 
 template <HW hw>
 template <HW hw_>
-typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opSend(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0, uint32_t exdesc, const RegData &desc)
 {
 #ifdef NGEN_SAFE
@@ -1885,7 +2020,7 @@ BinaryCodeGenerator<hw>::opSend(Opcode op, const InstructionModifier &mod, const
 
 template <HW hw>
 template <typename D, HW hw_>
-typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opSend(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0, uint32_t exdesc, D desc)
 {
     opSends(op, mod, dst, src0, null, exdesc, desc);
@@ -1893,7 +2028,7 @@ BinaryCodeGenerator<hw>::opSend(Opcode op, const InstructionModifier &mod, const
 
 template <HW hw>
 template <typename ED, typename D, HW hw_>
-typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opSends(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1, ED exdesc, D desc)
 {
     Instruction8 i{};
@@ -1920,7 +2055,7 @@ BinaryCodeGenerator<hw>::opSends(Opcode op, const InstructionModifier &mod, cons
 
 template <HW hw>
 template <typename D, HW hw_>
-typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opSends(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1, RegData exdesc, D desc)
 {
 #ifdef NGEN_SAFE
@@ -1930,16 +2065,16 @@ BinaryCodeGenerator<hw>::opSends(Opcode op, const InstructionModifier &mod, cons
 
 template <HW hw>
 template <typename D, HW hw_>
-typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opSends(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0, const RegData &src1, uint32_t exdesc, D desc)
 {
     Opcode mop = static_cast<Opcode>(static_cast<int>(op) & ~2);
-    opSend(mop, mod, static_cast<SharedFunction>(exdesc & 0xF), dst, src0, src1, exdesc, desc);
+    opSend(mop, mod, static_cast<SharedFunction>(exdesc & 0x1F), dst, src0, src1, exdesc, desc);
 }
 
 template <HW hw>
 template <HW hw_>
-typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opBranch(Opcode op, const InstructionModifier &mod, const RegData &dst, int32_t jip, int32_t uip)
 {
     Instruction8 i{};
@@ -1960,15 +2095,16 @@ BinaryCodeGenerator<hw>::opBranch(Opcode op, const InstructionModifier &mod, con
 
 template <HW hw>
 template <HW hw_>
-typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opBranch(Opcode op, const InstructionModifier &mod, const RegData &dst, int32_t jip, int32_t uip)
 {
+    typename EncodingTag12Dispatch<hw>::tag tag;
     Instruction12 i{};
     InstructionModifier emod = mod | defaultModifier;
 
-    encodeCommon12(i, op, emod);
+    encodeCommon12(i, op, emod, dst, tag);
 
-    i.binary.dst = encodeBinaryOperand12<true, false>(dst).bits;
+    i.binary.dst = encodeBinaryOperand12<true, false>(dst, tag).bits;
 
     i.binary.src0Imm = true;
     i.binary.src1Imm = true;
@@ -1981,7 +2117,7 @@ BinaryCodeGenerator<hw>::opBranch(Opcode op, const InstructionModifier &mod, con
 
 template <HW hw>
 template <bool forceWE, HW hw_>
-typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opBranch(Opcode op, const InstructionModifier &mod, const RegData &dst, int32_t jip)
 {
     Instruction8 i{};
@@ -2003,17 +2139,18 @@ BinaryCodeGenerator<hw>::opBranch(Opcode op, const InstructionModifier &mod, con
 
 template <HW hw>
 template <bool forceWE, HW hw_>
-typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opBranch(Opcode op, const InstructionModifier &mod, const RegData &dst, int32_t jip)
 {
+    typename EncodingTag12Dispatch<hw>::tag tag;
     Instruction12 i{};
     InstructionModifier emod = mod | defaultModifier;
     if (forceWE)
         emod |= NoMask;
 
-    encodeCommon12(i, op, emod);
+    encodeCommon12(i, op, emod, dst, tag);
 
-    i.binary.dst = encodeBinaryOperand12<true, false>(dst).bits;
+    i.binary.dst = encodeBinaryOperand12<true, false>(dst, tag).bits;
     i.binary.src0Imm = true;
     i.branches.jip = jip;
 
@@ -2022,7 +2159,7 @@ BinaryCodeGenerator<hw>::opBranch(Opcode op, const InstructionModifier &mod, con
 
 template <HW hw>
 template <bool forceWE, bool small12, HW hw_>
-typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opBranch(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0)
 {
     Instruction8 i{};
@@ -2044,18 +2181,19 @@ BinaryCodeGenerator<hw>::opBranch(Opcode op, const InstructionModifier &mod, con
 
 template <HW hw>
 template <bool forceWE, bool small12, HW hw_>
-typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opBranch(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0)
 {
+    typename EncodingTag12Dispatch<hw>::tag tag;
     Instruction12 i{};
     InstructionModifier emod = mod | defaultModifier;
     if (forceWE)
         emod |= NoMask;
 
-    encodeCommon12(i, op, emod);
+    encodeCommon12(i, op, emod, dst, tag);
 
-    i.binary.dst = encodeBinaryOperand12<true, false>(dst).bits;
-    i.binary.src0 = encodeBinaryOperand12<false, false>(src0).bits;
+    i.binary.dst = encodeBinaryOperand12<true, false>(dst, tag).bits;
+    i.binary.src0 = encodeBinaryOperand12<false, false>(src0, tag).bits;
     if (small12)
         i.binary.src0 &= 0xFFFF;
 
@@ -2082,7 +2220,7 @@ template <HW hw>
 void BinaryCodeGenerator<hw>::opCall(Opcode op, const InstructionModifier &mod, const RegData &dst, Label &jip)
 {
     addFixup(LabelFixup(jip.getID(labelManager), LabelFixup::JIPOffset));
-    if (isGen12)
+    if (isXe)
         opBranch<true>(op, mod, dst, 0);
     else
         opX<true>(op, DataType::d, mod, dst, null.ud(0)(0, 1, 0), Immediate::d(0));
@@ -2090,7 +2228,7 @@ void BinaryCodeGenerator<hw>::opCall(Opcode op, const InstructionModifier &mod, 
 
 template <HW hw>
 template <HW hw_>
-typename std::enable_if<hwLT(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwLT(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opJmpi(Opcode op, const InstructionModifier &mod, const RegData &dst, RegData src0, uint32_t jip)
 {
     Instruction8 i{};
@@ -2113,7 +2251,7 @@ BinaryCodeGenerator<hw>::opJmpi(Opcode op, const InstructionModifier &mod, const
 
 template <HW hw>
 template <HW hw_>
-typename std::enable_if<hwGE(hw_, HW::Gen12LP)>::type
+typename std::enable_if<hwGE(hw_, HW::Xe_LP)>::type
 BinaryCodeGenerator<hw>::opJmpi(Opcode op, const InstructionModifier &mod, const RegData &dst, RegData src0, uint32_t jip)
 {
     opBranch<true>(op, mod, dst, jip);
@@ -2122,23 +2260,24 @@ BinaryCodeGenerator<hw>::opJmpi(Opcode op, const InstructionModifier &mod, const
 template <HW hw>
 void BinaryCodeGenerator<hw>::opJmpi(Opcode op, const InstructionModifier &mod, const RegData &dst, const RegData &src0, Label &jip)
 {
-    if (hw >= HW::Gen12LP)
+    if (hw >= HW::Xe_LP)
         addFixup(LabelFixup(jip.getID(labelManager), LabelFixup::JIPOffset));
     opJmpi(op, mod, dst, src0, 0);
-    if (hw < HW::Gen12LP)
+    if (hw < HW::Xe_LP)
         addFixup(LabelFixup(jip.getID(labelManager), LabelFixup::JIPOffsetJMPI));
 }
 
 template <HW hw>
 void BinaryCodeGenerator<hw>::opSync(Opcode op, SyncFunction fc, const InstructionModifier &mod)
 {
-    if (hw < HW::Gen12LP)
+    if (hw < HW::Xe_LP)
         unsupported();
 
+    typename EncodingTag12Dispatch<hw>::tag tag;
     Instruction12 i{};
     InstructionModifier emod = mod | defaultModifier;
 
-    encodeCommon12(i, op, emod);
+    encodeCommon12(i, op, emod, null, tag);
 
     i.binary.dst = 0x1;
     i.binary.cmod = static_cast<int>(fc);
@@ -2147,20 +2286,23 @@ void BinaryCodeGenerator<hw>::opSync(Opcode op, SyncFunction fc, const Instructi
 }
 
 template <HW hw>
-void BinaryCodeGenerator<hw>::opSync(Opcode op, SyncFunction fc, const InstructionModifier &mod, const RegData &src0)
+void BinaryCodeGenerator<hw>::opSync(Opcode op, SyncFunction fc, const InstructionModifier &mod, RegData src0)
 {
-    if (hw < HW::Gen12LP)
+    typename EncodingTag12Dispatch<hw>::tag tag;
+    if (hw < HW::Xe_LP)
         unsupported();
 
     Instruction12 i{};
     InstructionModifier emod = mod | defaultModifier;
 
-    encodeCommon12(i, op, emod);
+    encodeCommon12(i, op, emod, null, tag);
 
     i.binary.dst = 0x1;
-    i.binary.src0 = encodeBinaryOperand12<false>(src0).bits;
-    i.binary.src0Type = getTypecode12(src0.getType());
-
+    if (!src0.isNull()) {
+        src0.setRegion(0, 1, 0);
+        i.binary.src0 = encodeBinaryOperand12<false>(src0, tag).bits;
+        i.binary.src0Type = getTypecode12(src0.getType());
+    }
     i.binary.cmod = static_cast<int>(fc);
 
     db(i);
@@ -2169,13 +2311,14 @@ void BinaryCodeGenerator<hw>::opSync(Opcode op, SyncFunction fc, const Instructi
 template <HW hw>
 void BinaryCodeGenerator<hw>::opSync(Opcode op, SyncFunction fc, const InstructionModifier &mod, const Immediate &src0)
 {
-    if (hw < HW::Gen12LP)
+    if (hw < HW::Xe_LP)
         unsupported();
 
+    typename EncodingTag12Dispatch<hw>::tag tag;
     Instruction12 i{};
     InstructionModifier emod = mod | defaultModifier;
 
-    encodeCommon12(i, op, emod);
+    encodeCommon12(i, op, emod, null, tag);
 
     i.binary.dst = 0x1;
     i.binary.src0Type = getTypecode12(src0.getType());

@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright 2020 Intel Corporation
+ * Copyright 2020-2021 Intel Corporation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,16 +17,19 @@
 #ifndef GPU_ZERO_PAD_ZERO_PAD_STRUCT_H
 #define GPU_ZERO_PAD_ZERO_PAD_STRUCT_H
 
-#define ZERO_PAD_MAX_STEP_SIZE 1024
+#define ZERO_PAD_MAX_STEP_SIZE 1536
 
 #ifdef IS_OCL_KERNEL
 #define ZERO_PAD_MASK_DATA_TYPE uchar
 #else
 #define ZERO_PAD_MASK_DATA_TYPE unsigned char
 #endif
+#define ZERO_PAD_MASK_DT_BITS (8 * sizeof(ZERO_PAD_MASK_DATA_TYPE))
 
-#define ZERO_PAD_MASK_SIZE \
-    (ZERO_PAD_MAX_STEP_SIZE / (8 * sizeof(ZERO_PAD_MASK_DATA_TYPE)))
+#define ZERO_PAD_MASK_SIZE (ZERO_PAD_MAX_STEP_SIZE / ZERO_PAD_MASK_DT_BITS)
+#define ZERO_PAD_BIT_MODE 0
+#define ZERO_PAD_LOOKUP_MODE 1
+
 typedef struct {
     ZERO_PAD_MASK_DATA_TYPE mask[ZERO_PAD_MASK_SIZE];
 } zero_pad_mask_t;

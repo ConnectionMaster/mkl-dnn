@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -42,11 +42,38 @@ int get_n_scales(const prb_t *prb) {
     }
 }
 
-int fill_memory(const prb_t *prb, data_kind_t kind, dnn_mem_t &mem) {
+// Filling for integers is different due to problematic int -> float conversion.
+// And it doesn't require many different points to be tested.
+int fill_memory_int(const prb_t *prb, data_kind_t kind, dnn_mem_t &mem) {
     const dt_conf_t c_src = prb->conf_in;
-    const auto dt = c_src->dt;
-    const int range = c_src->range;
-    const int max = c_src->min + range - 1;
+    const auto dt = mem.dt();
+    const int max = c_src->max;
+    const auto nelems = mem.nelems();
+
+    for (int64_t idx = 0; idx < nelems; ++idx) {
+        const int gen[4] = {
+                (int)max, /* saturate to max of output data type */
+                (int)c_src->min, /* saturate to min of output data type */
+                (int)0,
+                (int)16,
+        };
+
+        const int rng = kind == SRC ? (idx % 4) : ((idx * 5 / 4) % 4);
+        const int value = gen[rng];
+        switch (dt) {
+            case dnnl_s32: ((int *)mem)[idx] = value; break;
+            case dnnl_s8: ((int8_t *)mem)[idx] = (int8_t)value; break;
+            case dnnl_u8: ((uint8_t *)mem)[idx] = (uint8_t)value; break;
+            default: assert(!"not expected"); break;
+        }
+    }
+
+    return OK;
+}
+
+int fill_memory_fp(const prb_t *prb, data_kind_t kind, dnn_mem_t &mem) {
+    const dt_conf_t c_src = prb->conf_in;
+    const int max = c_src->max;
     const int scale_mask = attr_t::get_default_mask(prb->attr.oscale.policy);
 
     const auto nelems = mem.nelems();
@@ -66,26 +93,38 @@ int fill_memory(const prb_t *prb, data_kind_t kind, dnn_mem_t &mem) {
         };
 
         const int rng = kind == SRC ? (idx % 7) : ((idx * 8 / 7) % 7);
-        mem.set_elem(idx, round_to_nearest_representable(dt, gen[rng]));
+        mem.set_elem(idx, gen[rng]);
     }
 
     return OK;
+}
+
+int fill_memory(const prb_t *prb, data_kind_t kind, dnn_mem_t &mem) {
+    if (is_integral_dt(mem.dt())) return fill_memory_int(prb, kind, mem);
+    return fill_memory_fp(prb, kind, mem);
 }
 
 int fill_memory_extra(const prb_t *prb, dnnl_memory_extra_desc_t &extra) {
     extra.flags = dnnl_memory_extra_flag_none;
 
     if (prb->is_reorder_with_compensation()) {
-        int with_groups
-                = (prb->oflag & (FLAG_GCONV_S8S8 | FLAG_GCONV_ZP_COMP)) ? 1 : 0;
-        if (prb->oflag & (FLAG_CONV_S8S8 | FLAG_GCONV_S8S8)) {
-            extra.flags = dnnl_memory_extra_flag_compensation_conv_s8s8;
-            extra.compensation_mask = (1 << 0) + with_groups * (1 << 1);
-        }
-        if (prb->oflag & (FLAG_CONV_ZP_COMP | FLAG_GCONV_ZP_COMP)) {
-            extra.flags
-                    |= dnnl_memory_extra_flag_compensation_conv_asymmetric_src;
-            extra.asymm_compensation_mask = (1 << 0) + with_groups * (1 << 1);
+        for (const auto &i_oflag : prb->oflag) {
+            if (i_oflag.first & FLAG_S8S8_COMP) {
+                extra.flags |= dnnl_memory_extra_flag_compensation_conv_s8s8;
+                extra.compensation_mask = i_oflag.second;
+
+                const float s8_scale_factor = reorder_rescale_factor();
+                const bool need_rescale = s8_scale_factor != 1.f;
+                if (need_rescale) {
+                    extra.flags |= dnnl_memory_extra_flag_scale_adjust;
+                    extra.scale_adjust = s8_scale_factor;
+                }
+            }
+            if (i_oflag.first & FLAG_ZP_COMP) {
+                extra.flags
+                        |= dnnl_memory_extra_flag_compensation_conv_asymmetric_src;
+                extra.asymm_compensation_mask = i_oflag.second;
+            }
         }
     }
 
@@ -154,7 +193,7 @@ static int init_pd(dnnl_engine_t engine, const prb_t *prb,
                  rc.tag_out),
             CRIT);
 
-    // assign extra for dst_md
+    // Prepare and assign extra for dst_md.
     dnnl_memory_extra_desc_t dst_md_extra {};
     fill_memory_extra(prb, dst_md_extra);
     dst_d.extra = dst_md_extra;
@@ -170,12 +209,11 @@ static int init_pd(dnnl_engine_t engine, const prb_t *prb,
 
     attr_args_t attr_args;
     attr_args.prepare_output_scales(prb->attr, prb->scales, get_n_scales(prb));
-    auto dnnl_attr = create_dnnl_attr(prb->attr, attr_args);
+    auto dnnl_attr = make_benchdnn_dnnl_wrapper(
+            create_dnnl_attr(prb->attr, attr_args));
 
     dnnl_status_t init_status = dnnl_reorder_primitive_desc_create(
             &rpd, &src_d, src_engine, &dst_d, dst_engine, dnnl_attr);
-
-    dnnl_primitive_attr_destroy(dnnl_attr);
 
     if (init_status == dnnl_unimplemented)
         return res->state = UNIMPLEMENTED, OK;
@@ -185,17 +223,33 @@ static int init_pd(dnnl_engine_t engine, const prb_t *prb,
     if (maybe_skip(res->impl_name)) {
         BENCHDNN_PRINT(2, "SKIPPED: oneDNN implementation: %s\n",
                 res->impl_name.c_str());
-        DNN_SAFE(dnnl_primitive_desc_destroy(rpd), WARN);
         return res->state = SKIPPED, res->reason = SKIP_IMPL_HIT, OK;
     } else {
         BENCHDNN_PRINT(
                 5, "oneDNN implementation: %s\n", res->impl_name.c_str());
     }
 
+    if (attr_same_pd_check && !prb->attr.is_def()) {
+        dnnl_primitive_desc_t pd_no_attr {};
+        dnnl_primitive_attr_t dnnl_empty_attrs {};
+        DNN_SAFE(dnnl_reorder_primitive_desc_create(&pd_no_attr, &src_d,
+                         src_engine, &dst_d, dst_engine, dnnl_empty_attrs),
+                WARN);
+        auto pd_no_attr_wrapper = make_benchdnn_dnnl_wrapper(pd_no_attr);
+        SAFE(check_same_pd(res, pd_no_attr_wrapper), WARN);
+    }
+
     return OK;
 }
 
 void check_known_skipped_case(const prb_t *prb, res_t *res) {
+#if DNNL_CPU_RUNTIME == DNNL_RUNTIME_NONE \
+        || DNNL_GPU_RUNTIME == DNNL_RUNTIME_NONE
+    auto cross_engine = prb->cross_engine;
+    if (cross_engine == CPU2GPU || cross_engine == GPU2CPU)
+        res->state = SKIPPED, res->reason = CASE_NOT_SUPPORTED;
+#endif
+
     const auto sdt = prb->conf_in->dt;
     const auto ddt = prb->conf_out->dt;
     check_known_skipped_case_common({sdt, ddt}, FWD_D, res);
@@ -210,9 +264,15 @@ void check_known_skipped_case(const prb_t *prb, res_t *res) {
 
     if (prb->is_reorder_with_compensation()) {
         // compensation is supported for dst_dt = s8 so far
-        // compensation does not support any attributes or runtime dims
-        if (ddt != dnnl_s8 || !prb->attr.is_def()
-                || prb->runtime_dim_mask != 0) {
+        const bool dt_ok = ddt == dnnl_s8;
+        // compensation does not support any attributes but oscale
+        const bool attr_ok = prb->attr.scales.is_def()
+                && prb->attr.zero_points.is_def() && prb->attr.post_ops.is_def()
+                && prb->attr.oscale.runtime == false;
+        // compensation does not support runtime dims
+        const bool rt_ok = prb->runtime_dim_mask == 0;
+
+        if (!dt_ok || !attr_ok || !rt_ok) {
             res->state = SKIPPED, res->reason = CASE_NOT_SUPPORTED;
             return;
         }
@@ -252,6 +312,7 @@ int doit(const prb_t *prb, res_t *res) {
     if (bench_mode == LIST) return res->state = LISTED, OK;
 
     check_known_skipped_case(prb, res);
+    check_sum_post_ops(prb->attr, res);
     if (res->state == SKIPPED) return OK;
 
     //                                       ___________________
@@ -280,15 +341,14 @@ int doit(const prb_t *prb, res_t *res) {
     // 7. performance measurement
 
     /* Step 2: create target reorder primitive */
-    dnnl_primitive_t rp {};
-    SAFE(init_prim(&rp, init_pd, prb, res), WARN);
+    benchdnn_dnnl_wrapper_t<dnnl_primitive_t> prim;
+    SAFE(init_prim(prim, init_pd, prb, res), WARN);
     if (res->state == SKIPPED || res->state == UNIMPLEMENTED) return OK;
 
     const_dnnl_primitive_desc_t const_pd;
-    DNN_SAFE(dnnl_primitive_get_primitive_desc(rp, &const_pd), CRIT);
+    DNN_SAFE(dnnl_primitive_get_primitive_desc(prim, &const_pd), CRIT);
 
     if (check_mem_size(const_pd) != OK) {
-        DNN_SAFE_V(dnnl_primitive_destroy(rp));
         return res->state = SKIPPED, res->reason = NOT_ENOUGH_RAM, OK;
     }
 
@@ -340,14 +400,16 @@ int doit(const prb_t *prb, res_t *res) {
     /* Step 5: execute necessary reorders */
     SAFE(src_dt_in_fmt_in.reorder(src_dt_in_fmt_ref), WARN);
 
-    if (prb->attr.post_ops.find(attr_t::post_ops_t::kind_t::SUM) >= 0) {
+    const bool has_sum
+            = prb->attr.post_ops.find(attr_t::post_ops_t::kind_t::SUM) >= 0;
+    if (has_sum) {
         SAFE(fill_memory(prb, DST, dst_dt_out_fmt_ref), WARN);
         SAFE(dst_dt_out_fmt_out.reorder(dst_dt_out_fmt_ref), WARN);
     }
 
     dnn_mem_t scales, src_zero_points_m, dst_zero_points_m;
     maybe_prepare_runtime_scales(
-            scales, prb->attr, get_n_scales(prb), prb->scales);
+            scales, prb->attr.oscale, get_n_scales(prb), prb->scales);
     maybe_prepare_runtime_zero_points(
             src_zero_points_m, prb->attr, DNNL_ARG_SRC, 1, prb->src_zp);
     maybe_prepare_runtime_zero_points(
@@ -361,12 +423,12 @@ int doit(const prb_t *prb, res_t *res) {
     args.set(DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC, src_zero_points_m);
     args.set(DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_DST, dst_zero_points_m);
 
-    SAFE(execute_and_wait(rp, args), WARN);
+    SAFE(execute_and_wait(prim, args), WARN);
 
     /* Step 6: check correctness */
-    if (bench_mode & CORR) {
+    if (is_bench_mode(CORR)) {
         if (prb->is_reorder_with_compensation()) {
-            /* "bootstrap" algorithm: compare to another oneDNN reorder. use
+            /* "bootstrap" approach: compare to another oneDNN reorder. use
              * this when benchdnn does not know about all details of the data
              * layout, as is the case for compensated weights formats. */
 
@@ -376,20 +438,25 @@ int doit(const prb_t *prb, res_t *res) {
             dnn_mem_t ref_dst_dt_out_fmt_out(dst_md, dst_engine);
             ref_dst_dt_out_fmt_out.md_.extra = dst_extra;
 
-            SAFE(ref_dst_dt_out_fmt_out.reorder(src_dt_in_fmt_ref), WARN);
+            const_dnnl_primitive_attr_t const_attr;
+            DNN_SAFE(dnnl_primitive_desc_get_attr(const_pd, &const_attr), WARN);
+
+            SAFE(ref_dst_dt_out_fmt_out.reorder(src_dt_in_fmt_ref, const_attr),
+                    WARN);
 
             /* Step 5b: compare results (expect bit-wise exactness) */
             SAFE(compare_bootstrap(
                          ref_dst_dt_out_fmt_out, dst_dt_out_fmt_out, res),
                     WARN);
         } else {
-            /* (default) "reference" algorithm: compare to benchdnn reorder */
+            /* (default) "reference" approach: compare to benchdnn reorder */
 
             /* Step 5b: execute benchdnn reorder */
             SAFE(ref_reorder(prb, dst_dt_out_fmt_ref, src_dt_in_fmt_ref), WARN);
 
             /* Step 5c: compare benchdnn and oneDNN output */
-            compare::compare_t cmp;
+            using cmp_t = compare::compare_t;
+            cmp_t cmp;
             const bool has_s32 = src_md.data_type == dnnl_s32
                     || dst_md.data_type == dnnl_s32;
             const bool has_s8 = src_md.data_type == dnnl_s8
@@ -401,10 +468,20 @@ int doit(const prb_t *prb, res_t *res) {
             else if (has_s32 || has_s8)
                 cmp.set_zero_trust_percent(43.f); // 3/7 inputs becomes 0
 
-            // FIXME: when s32 -> u8 due to incorrect saturation for values
-            // greater than INT_MAX, 5 out of 7 inputs becomes 0.
-            if (has_s32 && has_u8)
-                cmp.set_zero_trust_percent(72.f); // 5/7 inputs becomes 0
+            // A hack to avoid false-positive result from f32->s32 conversion
+            // in case of sum post-op on GPU happening when two max_dt values
+            // are summed together.
+            using cmp_args_t = compare::compare_t::driver_check_func_args_t;
+            const auto reorder_add_check = [&](const cmp_args_t &args) {
+                if (args.dt == dnnl_s32 && args.got == max_dt(args.dt)
+                        && is_gpu()) {
+                    // 128.f = float(INT_MAX)
+                    //                - BENCHDNN_S32_TO_F32_SAT_CONST;
+                    return args.diff == 128.f;
+                }
+                return false;
+            };
+            cmp.set_driver_check_function(reorder_add_check);
 
             // TODO: enable additional checks for border values validity.
             SAFE(cmp.compare(dst_dt_out_fmt_ref, dst_dt_out_fmt_out, prb->attr,
@@ -414,11 +491,7 @@ int doit(const prb_t *prb, res_t *res) {
     }
 
     /* Step 7: performance measurement */
-    measure_perf(res->timer, rp, args);
-
-    DNN_SAFE_V(dnnl_primitive_destroy(rp));
-
-    return OK;
+    return measure_perf(res->timer, prim, args);
 }
 
 } // namespace reorder

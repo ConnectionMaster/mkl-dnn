@@ -113,17 +113,17 @@ cases the scale must be `1.0`.
 ### Sum Post-op
 
 The sum post-op accumulates the result of a primitive with the existing data.
-Prior to accumulating the result, the existing value would be multiplied by
-scale.
+Prior to accumulating the result, the existing value would be shifted by the
+zero point and multiplied by scale.
 
 The kind of this post-op is #dnnl::primitive::kind::sum.
 
 This feature might improve performance for cases like residual learning
 blocks, where the result of a convolution is accumulated to the previously
-computed activations. The scale parameter can be used in [INT8](@ref
-dev_guide_attributes_quantization) inference only when the result and previous
-activations have different magnitudes. For all other cases the scale must be
-`1.0`.
+computed activations. The scale parameter can be used in
+[INT8](@ref dev_guide_attributes_quantization) inference only when the result
+and previous activations have different magnitudes. For all other cases the
+scale must be `1.0`.
 
 The sum post-op replaces
 \f[
@@ -133,9 +133,8 @@ The sum post-op replaces
 with
 
 \f[
-    \dst[:] = scale \cdot \dst[:] + \operatorname{Op}(...)
+    \dst[:] = scale \cdot (\dst[:] - zero\_point) + \operatorname{Op}(...)
 \f]
-
 
 If the data type parameter is specified, the original destination tensor will be
 reinterpreted as a tensor with the provided data type. Because it is a
@@ -143,13 +142,15 @@ reinterpretation, data_type and the destination data type must have the same siz
 result, the computation will be:
 
 \f[
-    \dst(:) = scale \cdot \operatorname{as_data_type}(\dst(:)) + \operatorname{Op}(...)
+    \dst(:) = scale \cdot (\operatorname{as\_data\_type}(\dst[:]) - zero\_point) + \operatorname{Op}(...)
 \f]
 
 @note
 * Currently only a u8/s8 data type parameter is supported.
-**CPU**
-    - No support for different destination and sum data type.
+* **CPU**
+    * No support for different destination and sum data type.
+* **GPU**
+    * Zero point is not supported.
 
 @anchor dev_guide_attributes_post_ops_depthwise
 ### Depthwise Post-op
@@ -263,9 +264,14 @@ Currently the following scenarios are supported:
   \f$Source\_1\f$ coincides with a `dim[1]` value of
   \f$\operatorname{Op}(...)\f$, i.e. {1, C, 1, 1} for 2D spatial
   \f$\operatorname{Op}(...)\f$.
-
-Scenario when \f$Source\_1\f$ represents a full tensor as
-\f$\operatorname{Op}(...)\f$ is not supported yet.
+* Per element broadcast, when \f$Source\_1\f$ coincides with
+  \f$\operatorname{Op}(...)\f$. In this case user may create `src1` memory
+  descriptor with `format_tag::any` or set a specific tag. However, in later
+  case if tags mismatch with \f$\operatorname{Op}(...)\f$, it would result in
+  suboptimal performance. In case of using `format_tag::any`, a primitive
+  descriptor of the operation will initialize a memory descriptor for binary
+  post-operation which format may be queried from attributes using
+  `dnnl::post_ops::get_params_binary(...)` function call.
 
 ## Examples of Chained Post-ops
 

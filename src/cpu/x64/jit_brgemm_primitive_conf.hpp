@@ -44,11 +44,11 @@ struct jit_brgemm_primitive_conf_t {
     bool with_bias;
     bool with_sum;
     bool with_eltwise;
+    bool with_binary;
     bool with_scales;
     bool signed_input;
-    post_ops_t::entry_t::eltwise_t eltwise;
-    int nb_ic, ic_block;
-    int nb_oc, oc_block;
+    int nb_ic, ic_block, ic_block_ext;
+    int nb_oc, oc_block, oc_block_ext;
     int nb_iw, iw_block;
     int nb_ow, ow_block;
     int nb_os, os_block;
@@ -76,6 +76,7 @@ struct jit_brgemm_primitive_conf_t {
     int nthr, nthr_mb, nthr_oc_b, nthr_ic_b;
 
     cpu_isa_t isa;
+    bool ip_bwd_d_global_b_transpose;
 };
 
 } // namespace x64

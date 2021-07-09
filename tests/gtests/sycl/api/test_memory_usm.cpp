@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -36,7 +36,7 @@ protected:
         auto alloc_kind = cl::sycl::get_pointer_type(
                 usm_ptr, sycl_interop::get_context(eng));
         if (alloc_kind == cl::sycl::usm::alloc::host
-                && alloc_kind == cl::sycl::usm::alloc::shared) {
+                || alloc_kind == cl::sycl::usm::alloc::shared) {
             for (int i = 0; i < n; i++)
                 ((float *)usm_ptr)[i] = float(i);
         } else {
@@ -62,8 +62,17 @@ TEST_P(sycl_memory_usm_test, Constructor) {
     memory::dim n = 100;
     memory::desc mem_d({n}, memory::data_type::f32, memory::format_tag::x);
 
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_SYCL
+    if (eng_kind == engine::kind::cpu) {
+        int dummy_ptr;
+        EXPECT_ANY_THROW(sycl_interop::make_memory(
+                mem_d, eng, sycl_interop::memory_kind::usm, &dummy_ptr));
+        return;
+    }
+#endif
     void *ptr = cl::sycl::malloc_shared(sizeof(float) * n,
             sycl_interop::get_device(eng), sycl_interop::get_context(eng));
+
     auto mem = sycl_interop::make_memory(
             mem_d, eng, sycl_interop::memory_kind::usm, ptr);
 
@@ -77,6 +86,7 @@ TEST_P(sycl_memory_usm_test, Constructor) {
 
     {
         float *ptr_f32 = (float *)mem.get_data_handle();
+        GTEST_EXPECT_NE(ptr_f32, nullptr);
         for (int i = 0; i < n; i++) {
             ASSERT_EQ(ptr_f32[i], float(i));
         }
@@ -96,6 +106,14 @@ TEST_P(sycl_memory_usm_test, ConstructorNone) {
     engine eng(eng_kind, 0);
     memory::desc mem_d({0}, memory::data_type::f32, memory::format_tag::x);
 
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_SYCL
+    if (eng_kind == engine::kind::cpu) {
+        EXPECT_ANY_THROW(sycl_interop::make_memory(
+                mem_d, eng, sycl_interop::memory_kind::usm, DNNL_MEMORY_NONE));
+        return;
+    }
+#endif
+
     auto mem = sycl_interop::make_memory(
             mem_d, eng, sycl_interop::memory_kind::usm, DNNL_MEMORY_NONE);
 
@@ -114,13 +132,23 @@ TEST_P(sycl_memory_usm_test, ConstructorAllocate) {
     memory::dim n = 100;
     memory::desc mem_d({n}, memory::data_type::f32, memory::format_tag::x);
 
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_SYCL
+    if (eng_kind == engine::kind::cpu) {
+        EXPECT_ANY_THROW(sycl_interop::make_memory(mem_d, eng,
+                sycl_interop::memory_kind::usm, DNNL_MEMORY_ALLOCATE));
+        return;
+    }
+#endif
+
     auto mem = sycl_interop::make_memory(
             mem_d, eng, sycl_interop::memory_kind::usm, DNNL_MEMORY_ALLOCATE);
 
     void *ptr = mem.get_data_handle();
+    GTEST_EXPECT_NE(ptr, nullptr);
     fill_data(ptr, n, eng);
 
     float *mapped_ptr = mem.map_data<float>();
+    GTEST_EXPECT_NE(mapped_ptr, nullptr);
     for (int i = 0; i < n; i++) {
         ASSERT_EQ(mapped_ptr[i], float(i));
     }
@@ -139,13 +167,22 @@ TEST_P(sycl_memory_usm_test, DefaultConstructor) {
     memory::dim n = 100;
     memory::desc mem_d({n}, memory::data_type::f32, memory::format_tag::x);
 
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_SYCL
+    if (eng_kind == engine::kind::cpu) {
+        EXPECT_ANY_THROW(sycl_interop::make_memory(
+                mem_d, eng, sycl_interop::memory_kind::usm));
+        return;
+    }
+#endif
     auto mem = sycl_interop::make_memory(
             mem_d, eng, sycl_interop::memory_kind::usm);
 
     void *ptr = mem.get_data_handle();
+    GTEST_EXPECT_NE(ptr, nullptr);
     fill_data(ptr, n, eng);
 
     float *mapped_ptr = mem.map_data<float>();
+    GTEST_EXPECT_NE(mapped_ptr, nullptr);
     for (int i = 0; i < n; i++) {
         ASSERT_EQ(mapped_ptr[i], float(i));
     }

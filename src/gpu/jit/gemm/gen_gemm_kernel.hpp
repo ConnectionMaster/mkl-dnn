@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -65,7 +65,7 @@ protected:
     static ngen::HW convert_dnnl_arch_to_hw(compute::gpu_arch_t arch) {
         switch (arch) {
             case compute::gpu_arch_t::gen9: return ngen::HW::Gen9;
-            case compute::gpu_arch_t::gen12lp: return ngen::HW::Gen12LP;
+            case compute::gpu_arch_t::xe_lp: return ngen::HW::Xe_LP;
             default: return ngen::HW::Unknown;
         }
     }
@@ -76,40 +76,50 @@ protected:
     ngen::NEOInterfaceHandler interface_ {ngen::HW::Unknown};
 
 private:
+    static bool matching_hw(ngen::HW hw, ngen::HW hw_ref);
     status_t complete_strategy();
     status_t read_strategy(const char *str);
     status_t init_interface();
 };
 
 struct gen_gemm_nocopy_kernel_t : public gen_gemm_kernel_t {
-    status_t init(compute::gpu_arch_t arch, bool batch, bool trans_a,
-            bool trans_b, bool c_offset, data_type_t a_type, data_type_t b_type,
-            data_type_t c_type, int unroll_m, int unroll_n) {
+    status_t init(compute::gpu_arch_t arch, int batch_dims, bool trans_a,
+            bool trans_b, bool c_offset, bool bias, const post_ops_t &post_ops,
+            data_type_t a_type, data_type_t b_type, data_type_t c_type,
+            int unroll_m, int unroll_n) {
 
         problem_.Ta = convert_dnnl_to_kernel_type(a_type);
         problem_.Tb = convert_dnnl_to_kernel_type(b_type);
         problem_.Tc = convert_dnnl_to_kernel_type(c_type);
-        problem_.Ts = problem_.Tc;
+        problem_.Tc_ext = problem_.Ts = problem_.Tc;
         problem_.A.layout = trans_a ? MatrixLayout::T : MatrixLayout::N;
         problem_.B.layout = trans_b ? MatrixLayout::T : MatrixLayout::N;
         problem_.C.layout = MatrixLayout::N;
         problem_.A.crosspack = problem_.B.crosspack = problem_.C.crosspack = 1;
         problem_.A.packSize = problem_.B.packSize = problem_.C.packSize = 0;
         problem_.A.padded = problem_.B.padded = problem_.C.padded = false;
-        problem_.A.alignment = uint8_t(types::data_type_size(a_type));
-        problem_.B.alignment = uint8_t(types::data_type_size(b_type));
-        problem_.C.alignment = uint8_t(types::data_type_size(c_type));
+        problem_.A.setAlignment(int(types::data_type_size(a_type)));
+        problem_.B.setAlignment(int(types::data_type_size(b_type)));
+        problem_.C.setAlignment(int(types::data_type_size(c_type)));
         problem_.A.base = ngen::AddressBase::createA64(true);
         problem_.B.base = ngen::AddressBase::createA64(true);
         problem_.C.base = ngen::AddressBase::createA64(true);
-        problem_.batchedS = batch;
+        if (batch_dims > 0) {
+            problem_.batch = BatchMode::Strided;
+            problem_.batchDims = batch_dims;
+        }
         if (c_type == data_type::s32) {
             problem_.abOffset = ABOffset::Calc;
             problem_.Ts = Type::f32;
         }
-        if (c_offset) {
+        if (post_ops.len() > 0) {
+            problem_.post_ops = post_ops;
+            if (a_type == data_type::f16) problem_.Ts = Type::f32;
+        }
+        if (c_offset || bias) {
+            assert(!(c_offset && bias));
+            problem_.cOffset = bias ? COffset::Pre : COffset::Post;
             problem_.CO.base = ngen::AddressBase::createBTS(0);
-            problem_.cOffset = COffset::Post;
             problem_.CO.crosspack = 1;
             problem_.CO.padded = false;
             problem_.CO.alignment = problem_.C.alignment;

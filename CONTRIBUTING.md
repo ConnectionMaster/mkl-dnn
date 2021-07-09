@@ -14,22 +14,18 @@ You can:
 
 ## Pull request checklist
 
-Before sending your pull requests, please make sure that you followed this
-list.
+Before sending your pull requests, make sure that you have followed this list:
 
-* If you are contributing a new compute primitive, check the
-  [library functionality guidelines](CONTRIBUTING.md#library_functionality_guidelines).
-  It is strongly advised to first open an
-  [RFC pull request](CONTRIBUTING.md#RFC_pull_requests) with a
-  detailed explanation of expected use cases and performance benefits.
+* Check the [library functionality guidelines](CONTRIBUTING.md#library-functionality-guidelines).
+  If you are contributing a new compute primitive or propose changes to the
+  external API, it is strongly advised to first open an [RFC pull request](CONTRIBUTING.md#RFC-pull-requests)
+  with a detailed explanation of expected use cases and performance benefits.
 
 * Ensure that the changes are consistent with the
-  [code contribution guidelines](CONTRIBUTING.md#code_contribution_guidelines).
+  [code contribution guidelines](CONTRIBUTING.md#code-contribution-guidelines)
+  and [coding standards](CONTRIBUTING.md#coding-standards).
 
-* Check that the changes are consistent with the
-  [coding style](CONTRIBUTING.md#coding_style).
-
-* Check that [unit tests](CONTRIBUTING.md#unit_tests) pass.
+* Check that [unit tests](CONTRIBUTING.md#unit-tests) pass.
 
 ## Library functionality guidelines
 
@@ -53,7 +49,7 @@ criteria:
 
 Significant library changes (new primitives, library architecture changes,
 API modifications, etc) require approval from oneDNN maintainers before
-opening a Pull Request with such implementation. For that we use the Request
+opening a pull request with such implementation. For that we use the Request
 For Comments (RFC) process, which consists of opening, discussing, and
 accepting (promoting) RFC pull requests.
 
@@ -62,7 +58,7 @@ More information about the process can be found in the dedicated
 
 ## Code contribution guidelines
 
-The code must be:
+When submitting your contribution, please make sure that it is:
 
 * *Tested*: oneDNN uses gtests for lightweight functional testing and
   benchdnn for functionality that requires both performance and functional
@@ -76,29 +72,65 @@ The code must be:
   architectures, compilers, and run-times. The new code should be compliant
   with the [System Requirements](README.md#system-requirements).
 
-## Coding style
+All code in oneDNN gets promoted to product branches (`master`, `rls-`, and
+`mnt-`) only through GitHub pull requests. Requirements for promotion:
 
-The general principle is to follow the style of existing / surrounding code.
+- The request is reviewed and approved by maintainers for all affected
+  components.
+- All discussions in the pull request are resolved.
+- Continuous integration pipeline passed without errors.
+- Promotion to release (`rls-`) branches can be done only by maintainers
+  (enforced by GitHub)
+- The pull request author is responsible for collecting all the necessary
+  approvals, rebasing of the changes, and resolving the discussions.
 
-Particularly:
-* Use 4-space indentation.
-* Limit line length to 80 columns.
-* Do put spaces after `if`, `for`, `switch`; otherwise, do not put spaces
-  around braces, parenthesis, square or angle brackets.
-* Do put spaces around binary arithmetic operators.
-* Avoid trailing and double spaces (unless used for indentation).
-* Do not indent namespaces, `private:`, `public:`, `protected:` and case
-  labels.
-* Keep opening brace on the same line as the statement or function.
+To simplify the work of reviewers, make sure that the commits in the pull
+request adhere to the following requirements:
 
-If in doubt, use the `clang-format`:
-```sh
-clang-format -style=file -i foo.cpp
-```
-This will format code using the `_clang_format` file found in the oneDNN
-top level directory.
+- Commit message should be fit into 50 (at most 72) characters and have the
+  imperative mood.
+- Commit message should follow the format:
+  `<scope>:[scope: ..] <short description>`
+  Scope examples:
+  * Top level: `build`, `api`, `doc`, `tests`, `common`, `cpu`, `gpu`
+  * Second level: `convolution`, `pooling`, `utils`, `verbose`
+  * Example commit message:
+~~~git
+common: verbose: fix crash when prim_iface_t is empty
+~~~
 
-Coding style is secondary to the general code design.
+- Commit body should also fit 72 characters. Think of it as a standard e-mail
+  body or a markdown document in terms of styling - write sentences from the
+  very left border keeping capital letters and punctuation in place.
+- oneDNN branches maintain linear history. Rebase the changes on top of target
+  branch before creating a pull request. Rebase again after resolving all the
+  discussions, as well as in case of merge conflicts.
+- Use `git add -p`  and `git rebase -i` liberally to split unrelated changes
+  into multiple self-contained commits. This is a courtesy to reviewers: smaller
+  commits are easier to comprehend. It also helps with bisecting in the future.
+  Of course judgement needs to be applied whether to split changes or not. For
+  example, split code cleanup and the actual fix into two separate patches.
+
+## Coding Standards
+
+Contributions to oneDNN must follow the [Coding Standards](CODING_STANDARDS.md)
+in order to simplify development and review processes. The general principle is
+to follow the style of existing/surrounding code.
+
+The Coding Standards are subject to change and contributions to the Coding
+Standards are welcome.
+
+If you wish to propose changes to the Coding Standards (including `clang-tidy`
+checks and `clang-format` options), please submit the proposal via an [RFC pull
+request](CONTRIBUTING.md#RFC-pull-requests). The proposal should contain the
+following information:
+* *Motivation*: Why should the proposed standard be introduced and applied?
+* *Enforcement*: Can the proposed standard be applied via an automated process
+  or other practical means?
+* *Example*: What does the code base look like with the proposed standard
+  applied?
+  * For instance, in case of a `clang-tidy` check, please open a separate PR
+    with the check applied to the code base alongside the RFC PR.
 
 ## Unit tests
 

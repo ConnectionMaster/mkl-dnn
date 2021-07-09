@@ -35,6 +35,7 @@ namespace gpu {
 namespace ocl {
 
 struct ref_matmul_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_matmul_pd_t {
         using gpu_matmul_pd_t::gpu_matmul_pd_t;
 
@@ -55,9 +56,8 @@ struct ref_matmul_t : public gpu_primitive_t {
                             attr()->zero_points_.has_default_values())
                     && attr()->has_default_values(smask_t::oscale_runtime
                             | smask_t::zero_points_runtime | smask_t::post_ops)
-                    && attr_oscale_ok()
-                    && post_ops_with_binary_ok(attr(), dst_dt_, 3)
-                    && set_default_formats()
+                    && attr_oscale_ok() && set_default_formats()
+                    && !has_blocks()
                     && ((utils::one_of(src_dt_, u8, s8)
                                 && utils::one_of(wei_dt_, u8, s8)
                                 && utils::one_of(dst_dt_, f32, s8, u8, s32)
@@ -73,7 +73,9 @@ struct ref_matmul_t : public gpu_primitive_t {
                                                 && utils::one_of(
                                                         dst_dt_, bf16, f32)))
                                     && IMPLICATION(with_bias(),
-                                            utils::one_of(bia_dt_, f32))));
+                                            utils::one_of(bia_dt_, f32))))
+                    && post_ops_with_binary_ok(attr(), dst_dt_, 6)
+                    && attr_.set_default_formats(dst_md(0)) == status::success;
 
             if (!ok) return status::unimplemented;
 
@@ -149,8 +151,6 @@ struct ref_matmul_t : public gpu_primitive_t {
         memory_desc_t scales_md_ = memory_desc_t();
     };
 
-    ref_matmul_t(const pd_t *apd) : gpu_primitive_t(apd) {}
-
     status_t init(engine_t *engine) override {
         compute::kernel_ctx_t kernel_ctx;
 
@@ -159,7 +159,7 @@ struct ref_matmul_t : public gpu_primitive_t {
         kernel_ctx.define_int("NON_DEFAULT_ATTRS", pd()->non_default_attrs_);
 
         kernel_ctx.set_data_type(pd()->dst_dt_);
-        def_attr_info(kernel_ctx, pd()->attr_info_);
+        def_attr_info(kernel_ctx, pd()->attr_info_, pd()->attr()->post_ops_);
 
         def_data_type(kernel_ctx, pd()->src_dt_, "SRC");
         def_data_type(kernel_ctx, pd()->wei_dt_, "WEI");

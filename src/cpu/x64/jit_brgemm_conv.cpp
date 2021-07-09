@@ -18,6 +18,7 @@
 #include "common/dnnl_thread.hpp"
 #include "common/type_helpers.hpp"
 #include "common/utils.hpp"
+#include "cpu/x64/injectors/jit_uni_binary_injector.hpp"
 
 #include "cpu/x64/jit_brgemm_conv.hpp"
 
@@ -62,38 +63,27 @@ template <cpu_isa_t isa, data_type_t src_type, data_type_t wei_type,
 status_t
 brgemm_convolution_fwd_t<isa, src_type, wei_type, dst_type>::pd_t::init(
         engine_t *engine) {
-    auto check_attr = [=]() {
-        if (utils::one_of(src_type, data_type::u8, data_type::s8)) {
-            return attr()->has_default_values(
-                    primitive_attr_t::skip_mask_t::oscale
-                    | primitive_attr_t::skip_mask_t::post_ops);
-        } else {
-            return attr()->has_default_values(
-                    primitive_attr_t::skip_mask_t::post_ops);
-        }
-    };
+    using namespace data_type;
+    using namespace utils;
+    using skip_mask_t = primitive_attr_t::skip_mask_t;
+    auto skip_mask = skip_mask_t::post_ops;
+    if (one_of(src_type, u8, s8)) skip_mask |= skip_mask_t::oscale;
 
-    bool ok = true && is_fwd()
-            && set_default_alg_kind(alg_kind::convolution_direct)
+    bool ok = is_fwd() && set_default_alg_kind(alg_kind::convolution_direct)
             && expect_data_types(src_type, wei_type, data_type::undef, dst_type,
                     data_type::undef)
             && IMPLICATION(with_bias(),
-                    ((utils::one_of(src_type, data_type::u8, data_type::s8)
-                             && utils::one_of(bias_md_.data_type,
-                                     data_type::f32, data_type::s32,
-                                     data_type::s8, data_type::u8))
-                            || (utils::one_of(src_type, data_type::bf16)
-                                    && utils::one_of(bias_md_.data_type,
-                                            data_type::f32, data_type::bf16))
-                            || (utils::one_of(src_type, data_type::f32)
-                                    && utils::one_of(bias_md_.data_type,
-                                            data_type::f32))))
-            && check_attr() && !has_zero_dim_memory();
-
+                    ((one_of(src_type, u8, s8)
+                             && one_of(bias_md_.data_type, f32, s32, s8, u8))
+                            || (one_of(src_type, bf16)
+                                    && one_of(bias_md_.data_type, f32, bf16))
+                            || (one_of(src_type, f32)
+                                    && one_of(bias_md_.data_type, f32))))
+            && attr()->has_default_values(skip_mask) && !has_zero_dim_memory();
     if (!ok) return status::unimplemented;
 
     CHECK(brgemm_convolution_utils::init_conf(jcp_, isa, *desc(), src_md_,
-            weights_md_, dst_md_, bias_md_, *attr(), dnnl_get_max_threads()));
+            weights_md_, dst_md_, bias_md_, attr_, dnnl_get_max_threads()));
 
     brgs_sz_ = jcp_.ow_block * 2 * 2 * 2;
     brgs_.resize(brgs_sz_);
@@ -103,14 +93,14 @@ brgemm_convolution_fwd_t<isa, src_type, wei_type, dst_type>::pd_t::init(
     const float alpha = 1.0;
     const float beta = 1.0;
 
-    const auto &p = attr_->post_ops_;
+    const auto &p = attr()->post_ops_;
     const int sum_idx = p.find(primitive_kind::sum);
     with_sum = (sum_idx != -1);
 
     for (int i = 0; i < jcp_.M; i++) {
         auto vM = i + 1;
         // init only needed brgemm descriptors
-        if (utils::one_of(jcp_.exec_type, exec_trans, exec_vpad) && vM != jcp_.M
+        if (one_of(jcp_.exec_type, exec_trans, exec_vpad) && vM != jcp_.M
                 && vM != jcp_.M_tail)
             continue;
         for_(int i_init = 0; i_init < 2; i_init++)
@@ -137,11 +127,10 @@ brgemm_convolution_fwd_t<isa, src_type, wei_type, dst_type>::pd_t::init(
             brgattr.wary_tail_read = false;
             CHECK(brgemm_desc_set_attr(&brg, brgattr));
 
-            auto dt_d = dst_type;
             auto LDD = jcp_.oc_without_padding;
             brg.with_sum = with_sum;
             CHECK(brgemm_desc_set_postops(
-                    &brg, attr(), dt_d, LDD, jcp_.bia_dt));
+                    &brg, attr(), &dst_md_, LDD, jcp_.bia_dt));
         }
     }
 
@@ -348,7 +337,7 @@ status_t brgemm_convolution_fwd_t<isa, src_type, wei_type, dst_type>::init(
     pbuf_h_sz = jcp.ihp * pbuf_w_sz;
     pbuf_d_sz = jcp.idp * pbuf_h_sz;
 
-    need_postwork = jcp.with_bias || jcp.with_eltwise
+    need_postwork = jcp.with_bias || jcp.with_eltwise || jcp.with_binary
             || (one_of(src_type, u8, s8) && wei_type == s8) // oscales needed
             || (jcp.dst_dt != jcp.acc_dt) || jcp.with_sum;
 
@@ -498,8 +487,10 @@ status_t brgemm_convolution_fwd_t<isa, src_type, wei_type, dst_type>::execute(
         const exec_ctx_t &ctx) const {
     const auto &jcp = pd()->jcp_;
 
-    const src_data_t *const __restrict src
-            = CTX_IN_MEM(const src_data_t *, DNNL_ARG_SRC);
+    brgemm_exec_ctx_t brgemm_ctx(ctx, pd());
+
+    const src_data_t *const __restrict src = brgemm_ctx.src;
+
     const memory_tracking::grantor_t scratchpad = ctx.get_scratchpad_grantor();
     brgemm_batch_element_t *const __restrict brg_batch_global
             = (jcp.brg_type == brgemm_strd && jcp.exec_type != exec_vpad)
@@ -559,16 +550,16 @@ status_t brgemm_convolution_fwd_t<isa, src_type, wei_type, dst_type>::execute(
             for (int oh = oh_begin; oh < oh_end; oh++) { \
                 for (int icc = 0; icc < ic_chunks; icc++) { \
                     if (jcp.exec_type == exec_base) { \
-                        ker_base(ctx, ithr, brg_batch, c_buffer, g, n, ocb, \
-                                od, oh, owb, icc); \
+                        ker_base(brgemm_ctx, ithr, brg_batch, c_buffer, g, n, \
+                                ocb, od, oh, owb, icc); \
                     } else if (jcp.exec_type == exec_trans) { \
                         maybe_conv_inp(ithr, src, inp_buffer, inp_buffer_mask, \
                                 g, n, icc, odb, ohb, owb); \
-                        ker_trans(ctx, ithr, brg_batch, c_buffer, inp_buffer, \
-                                g, n, ocb, od, oh, owb, icc); \
+                        ker_trans(brgemm_ctx, ithr, brg_batch, c_buffer, \
+                                inp_buffer, g, n, ocb, od, oh, owb, icc); \
                     } else if (jcp.exec_type == exec_vpad) { \
-                        ker_vpad(ctx, ithr, brg_batch, c_buffer, g, n, ocb, \
-                                od, oh, owb, icc); \
+                        ker_vpad(brgemm_ctx, ithr, brg_batch, c_buffer, g, n, \
+                                ocb, od, oh, owb, icc); \
                     } else \
                         assert(0); \
                 } \
@@ -598,7 +589,8 @@ template <cpu_isa_t isa, data_type_t src_type, data_type_t wei_type,
 void brgemm_convolution_fwd_t<isa, src_type, wei_type,
         dst_type>::perform_outwork(dst_data_t *dst_base, char *c_buffer,
         const char *bias_w, int od, int oh, int ow, int g_oc, bool is_oc_tail,
-        int ker_ow_s, int ker_ow_f, int kd_l, int kh_l, bool do_init,
+        int ker_ow_s, int ker_ow_f, int kd_l, int kh_l,
+        const void *post_ops_binary_rhs_arg_vec, bool do_init,
         bool do_postwork) const {
     if (!do_init && !do_postwork) return;
 
@@ -616,6 +608,8 @@ void brgemm_convolution_fwd_t<isa, src_type, wei_type,
     if (do_postwork) {
         p.ptr_bias = (void *)bias_w;
         p.ptr_scales = (void *)&oscales[jcp.is_oc_scale * g_oc];
+        p.ptr_binary_post_ops_rhs = post_ops_binary_rhs_arg_vec;
+        p.oc_l_offset = g_oc;
     }
 
     auto call_outwork_ker = [&](bool is_postwork, int ow_pw_s, int ow_pw_l) {
@@ -658,13 +652,18 @@ template <cpu_isa_t isa, data_type_t src_type, data_type_t wei_type,
 void brgemm_convolution_fwd_t<isa, src_type, wei_type,
         dst_type>::call_brgemm_kernel(brgemm_kernel_t *brg_ker, int batch_size,
         brgemm_batch_element_t *const __restrict brg_batch, char *ptr_C,
-        dst_data_t *ptr_D, const char *bias_w, int g_oc,
-        bool do_postops) const {
+        dst_data_t *ptr_D, const char *bias_w, int g_oc, bool do_postops,
+        const void *binary_post_ops_rhs) const {
     const auto &jcp = pd()->jcp_;
-    if (do_postops)
-        brgemm_kernel_execute_postops(brg_ker, batch_size, brg_batch, ptr_C,
-                ptr_D, (void *)bias_w, &oscales[jcp.is_oc_scale * g_oc]);
-    else
+    if (do_postops) {
+        const brgemm_post_ops_data_t post_ops_data {
+                static_cast<const void *>(bias_w),
+                &oscales[jcp.is_oc_scale * g_oc], binary_post_ops_rhs,
+                static_cast<size_t>(g_oc)};
+
+        brgemm_kernel_execute_postops(
+                brg_ker, batch_size, brg_batch, ptr_C, ptr_D, post_ops_data);
+    } else
         brgemm_kernel_execute(brg_ker, batch_size, brg_batch, ptr_C);
 }
 
@@ -754,14 +753,12 @@ void brgemm_convolution_fwd_t<isa, src_type, wei_type,
 }
 
 #define BRGEMM_CONV_KER_HEADER \
-    const src_data_t *const __restrict src \
-            = CTX_IN_MEM(const src_data_t *, DNNL_ARG_SRC); \
-    const wei_data_t *const __restrict weights \
-            = CTX_IN_MEM(const wei_data_t *, DNNL_ARG_WEIGHTS); \
-    const char *const __restrict bias \
-            = CTX_IN_MEM(const char *, DNNL_ARG_BIAS); \
-    dst_data_t *const __restrict dst \
-            = CTX_OUT_MEM(dst_data_t *, DNNL_ARG_DST); \
+    const src_data_t *const __restrict src = brgemm_ctx.src; \
+    const wei_data_t *const __restrict weights = brgemm_ctx.weights; \
+    const char *const __restrict bias = brgemm_ctx.bias; \
+    dst_data_t *const __restrict dst = brgemm_ctx.dst; \
+    const std::vector<const void *> &post_ops_binary_rhs_arg_vec \
+            = brgemm_ctx.post_ops_binary_rhs_arg_vec; \
     const int oc = ocb * jcp.oc_block; \
     const int g_oc = g * jcp.oc + oc; \
     const int icb = icc * jcp.nb_ic_blocking; \
@@ -795,7 +792,7 @@ void brgemm_convolution_fwd_t<isa, src_type, wei_type,
 template <cpu_isa_t isa, data_type_t src_type, data_type_t wei_type,
         data_type_t dst_type>
 void brgemm_convolution_fwd_t<isa, src_type, wei_type, dst_type>::ker_base(
-        const exec_ctx_t &ctx, int ithr,
+        const brgemm_exec_ctx_t &brgemm_ctx, int ithr,
         brgemm_batch_element_t *const __restrict brg_batch,
         char *const c_buffer, int g, int n, int ocb, int od, int oh, int owb,
         int icc) const {
@@ -849,7 +846,7 @@ void brgemm_convolution_fwd_t<isa, src_type, wei_type, dst_type>::ker_base(
         }
 
         call_brgemm_kernel(brg_ker, k_l * n_ic_blocks, brg_batch, ptr_C, ptr_D,
-                bias_w, g_oc, do_postops);
+                bias_w, g_oc, do_postops, post_ops_binary_rhs_arg_vec.data());
     };
 
     const auto kdhw_loop = [&]() {
@@ -901,7 +898,8 @@ void brgemm_convolution_fwd_t<isa, src_type, wei_type, dst_type>::ker_base(
             }
         }
         perform_outwork(dst_base, c_buffer, bias_w, od, oh, ow, g_oc,
-                is_oc_tail, ow_b, ow_e, kd_l, kh_l, do_init, do_postwork);
+                is_oc_tail, ow_b, ow_e, kd_l, kh_l,
+                post_ops_binary_rhs_arg_vec.data(), do_init, do_postwork);
     };
 
     if (kd_f > kd_s && kh_f > kh_s && kw_f > kw_s) {
@@ -952,14 +950,15 @@ void brgemm_convolution_fwd_t<isa, src_type, wei_type, dst_type>::ker_base(
         const auto do_init = icc == 0;
         const auto do_postwork = need_postwork && icc == (ic_chunks - 1);
         perform_outwork(dst_base, c_buffer, bias_w, od, oh, ow, g_oc,
-                is_oc_tail, ow, ow, kd_l, kh_l, do_init, do_postwork);
+                is_oc_tail, ow, ow, kd_l, kh_l,
+                post_ops_binary_rhs_arg_vec.data(), do_init, do_postwork);
     }
 }
 
 template <cpu_isa_t isa, data_type_t src_type, data_type_t wei_type,
         data_type_t dst_type>
 void brgemm_convolution_fwd_t<isa, src_type, wei_type, dst_type>::ker_trans(
-        const exec_ctx_t &ctx, int ithr,
+        const brgemm_exec_ctx_t &brgemm_ctx, int ithr,
         brgemm_batch_element_t *const __restrict brg_batch,
         char *const c_buffer, src_data_t *inp_buffer, int g, int n, int ocb,
         int od, int oh, int owb, int icc) const {
@@ -1030,7 +1029,7 @@ void brgemm_convolution_fwd_t<isa, src_type, wei_type, dst_type>::ker_trans(
         }
 
         call_brgemm_kernel(brg_ker, k_l * n_ic_blocks, brg_batch, ptr_C, ptr_D,
-                bias_w, g_oc, do_postops);
+                bias_w, g_oc, do_postops, post_ops_binary_rhs_arg_vec.data());
     };
 
     const auto kdhw_loop = [&]() {
@@ -1066,14 +1065,15 @@ void brgemm_convolution_fwd_t<isa, src_type, wei_type, dst_type>::ker_trans(
         const auto do_init = icc == 0;
         const auto do_postwork = need_postwork && icc == (ic_chunks - 1);
         perform_outwork(dst_base, c_buffer, bias_w, od, oh, ow, g_oc,
-                is_oc_tail, ow, ow, kd_l, kh_l, do_init, do_postwork);
+                is_oc_tail, ow, ow, kd_l, kh_l,
+                post_ops_binary_rhs_arg_vec.data(), do_init, do_postwork);
     }
 }
 
 template <cpu_isa_t isa, data_type_t src_type, data_type_t wei_type,
         data_type_t dst_type>
 void brgemm_convolution_fwd_t<isa, src_type, wei_type, dst_type>::ker_vpad(
-        const exec_ctx_t &ctx, int ithr,
+        const brgemm_exec_ctx_t &brgemm_ctx, int ithr,
         brgemm_batch_element_t *const __restrict brg_batch,
         char *const c_buffer, int g, int n, int ocb, int od, int oh, int owb,
         int icc) const {
@@ -1160,7 +1160,7 @@ void brgemm_convolution_fwd_t<isa, src_type, wei_type, dst_type>::ker_vpad(
         }
 
         call_brgemm_kernel(brg_ker, k_l * n_ic_blocks, brg_batch, ptr_C, ptr_D,
-                bias_w, g_oc, do_postops);
+                bias_w, g_oc, do_postops, post_ops_binary_rhs_arg_vec.data());
     };
 
     const auto kdhw_loop = [&]() {
@@ -1196,7 +1196,8 @@ void brgemm_convolution_fwd_t<isa, src_type, wei_type, dst_type>::ker_vpad(
         const auto do_init = icc == 0;
         const auto do_postwork = need_postwork && icc == (ic_chunks - 1);
         perform_outwork(dst_base, c_buffer, bias_w, od, oh, ow, g_oc,
-                is_oc_tail, ow, ow, kd_l, kh_l, do_init, do_postwork);
+                is_oc_tail, ow, ow, kd_l, kh_l,
+                post_ops_binary_rhs_arg_vec.data(), do_init, do_postwork);
     }
 }
 

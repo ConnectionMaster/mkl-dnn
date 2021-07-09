@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -35,6 +35,7 @@ namespace gpu {
 namespace ocl {
 
 struct ref_batch_normalization_fwd_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_batch_normalization_fwd_pd_t {
         pd_t(const batch_normalization_desc_t *adesc,
                 const primitive_attr_t *attr,
@@ -83,21 +84,23 @@ struct ref_batch_normalization_fwd_t : public gpu_primitive_t {
         offsets_t off;
     };
 
-    ref_batch_normalization_fwd_t(const pd_t *apd) : gpu_primitive_t(apd) {}
-
     status_t init(engine_t *engine) override {
         compute::kernel_ctx_t kernel_ctx;
 
         status_t status = pd()->init_kernel_ctx(kernel_ctx);
         CHECK(status);
 
-        std::vector<const char *> kernel_names
-                = {"ref_bnorm_fwd", nullptr, nullptr, nullptr, nullptr};
+        std::vector<const char *> kernel_names = {
+                "ref_bnorm_fwd", nullptr, nullptr, nullptr, nullptr, nullptr};
         if (pd()->conf.calculate_stats) {
             kernel_names[1] = "calculate_mean";
             kernel_names[2] = "calculate_variance";
             kernel_names[3] = "reduce_mean";
             kernel_names[4] = "reduce_variance";
+        }
+
+        if (pd()->conf.skip_reduce_stat) {
+            kernel_names[5] = "calculate_mean_variance";
         }
 
         std::vector<compute::kernel_t> kernels;
@@ -109,6 +112,7 @@ struct ref_batch_normalization_fwd_t : public gpu_primitive_t {
         calculate_variance_kernel_ = kernels[2];
         reduce_mean_kernel_ = kernels[3];
         reduce_variance_kernel_ = kernels[4];
+        calculate_mean_variance_kernel_ = kernels[5];
 
         return status::success;
     }
@@ -125,9 +129,11 @@ private:
     compute::kernel_t reduce_mean_kernel_;
     compute::kernel_t calculate_variance_kernel_;
     compute::kernel_t reduce_variance_kernel_;
+    compute::kernel_t calculate_mean_variance_kernel_;
 };
 
 struct ref_batch_normalization_bwd_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_batch_normalization_bwd_pd_t {
         pd_t(const batch_normalization_desc_t *adesc,
                 const primitive_attr_t *attr,
@@ -166,8 +172,6 @@ struct ref_batch_normalization_bwd_t : public gpu_primitive_t {
         bnorm_conf_t conf;
         offsets_t off;
     };
-
-    ref_batch_normalization_bwd_t(const pd_t *apd) : gpu_primitive_t(apd) {}
 
     status_t init(engine_t *engine) override {
         compute::kernel_ctx_t kernel_ctx;

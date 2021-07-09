@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2018-2020 Intel Corporation
+* Copyright 2018-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -38,6 +38,7 @@ struct node_t {
     ptrdiff_t is; // input stride
     ptrdiff_t os; // output stride
     ptrdiff_t ss; // scale stride
+    ptrdiff_t cs; // compensation stride
 };
 
 enum class scale_type_t { NONE, COMMON, MANY };
@@ -51,10 +52,23 @@ struct prb_t {
     ptrdiff_t ooff;
     scale_type_t scale_type;
     float beta;
+    int full_ndims;
+    int ip_tail;
+    int op_tail;
+    int iblock;
+    int oblock;
+    int blk_chunk_idx;
+    bool req_s8s8_comp = false;
+    bool req_asymmetric_comp = false;
+    bool req_src_zp = false;
+    bool req_dst_zp = false;
 };
 
 status_t prb_init(prb_t &prb, const memory_desc_t &imd,
-        const memory_desc_t &omd, const primitive_attr_t *attr);
+        const memory_desc_t &omd, const primitive_attr_t *attr,
+        bool with_groups = false);
+
+status_t prb_check_blk(prb_t &prb, const memory_desc_t &imd);
 
 /** sorts the problem nodes so that output strides come in ascending order */
 void prb_normalize(prb_t &p);
@@ -81,6 +95,10 @@ struct call_param_t {
     const void *in;
     void *out;
     const float *scale;
+    int src_zp;
+    int dst_zp;
+    size_t blk_chunks;
+    int32_t *compensation_scratch;
 };
 
 struct kernel_t {
@@ -89,7 +107,10 @@ struct kernel_t {
         prb_t prb;
     };
 
-    kernel_t(const desc_t &desc) : desc_(desc) {}
+    kernel_t(const desc_t &desc)
+        : desc_(desc)
+        , compensation_needed_(
+                  desc.prb.req_s8s8_comp || desc.prb.req_asymmetric_comp) {}
     virtual void operator()(const call_param_t *c) const = 0;
     virtual status_t create_kernel() = 0;
     virtual ~kernel_t() {}
@@ -108,17 +129,105 @@ struct kernel_t {
 protected:
     const desc_t desc_;
     const prb_t &prb_ = desc_.prb;
+    bool compensation_needed_ = false;
 };
 
 /* TODO: add trans_t class */
 
+struct jit_single_blk_kernel_t;
+
 } // namespace tr
 
-/* for cpu reorder list */
-status_t jit_uni_reorder_create(reorder_pd_t **reorder_pd, engine_t *engine,
-        const primitive_attr_t *attr, engine_t *src_engine,
-        const memory_desc_t *src_md, engine_t *dst_engine,
-        const memory_desc_t *dst_md);
+struct jit_uni_reorder_t : public primitive_t {
+    using primitive_t::primitive_t;
+    struct pd_t : public cpu_reorder_pd_t {
+        using cpu_reorder_pd_t::cpu_reorder_pd_t;
+
+        DECLARE_COMMON_PD_T("jit:uni", jit_uni_reorder_t);
+
+        tr::prb_t prb_;
+        tr::kernel_t::desc_t ker_desc_;
+        int nthr_;
+        bool with_groups_ = false;
+
+        status_t init(
+                engine_t *engine, engine_t *src_engine, engine_t *dst_engine);
+
+    private:
+        void init_scratchpad();
+        static status_t create(reorder_pd_t **reorder_pd, engine_t *engine,
+                const primitive_attr_t *attr, engine_t *src_engine,
+                const memory_desc_t *src_md, engine_t *dst_engine,
+                const memory_desc_t *dst_md);
+
+        friend dnnl::impl::impl_list_item_t;
+    };
+
+    status_t init(engine_t *engine) override;
+    status_t execute(const exec_ctx_t &ctx) const override;
+
+    enum { ndims_driver_max = 4 };
+
+private:
+    void omp_driver_0d(int off, const char *in, char *out, const float *scale,
+            int src_zp, int dst_zp, int32_t *compensation_scratch) const;
+    void omp_driver_1d(int ithr, int nthr, int off, const char *in, char *out,
+            const float *scale, int src_zp, int dst_zp,
+            int32_t *compensation_scratch) const;
+    void omp_driver_2d(int ithr, int nthr, int off, const char *in, char *out,
+            const float *scale, int src_zp, int dst_zp,
+            int32_t *compensation_scratch) const;
+    void omp_driver_3d(int ithr, int nthr, int off, const char *in, char *out,
+            const float *scale, int src_zp, int dst_zp,
+            int32_t *compensation_scratch) const;
+    void omp_driver_4d(int ithr, int nthr, int off, const char *in, char *out,
+            const float *scale, int src_zp, int dst_zp,
+            int32_t *compensation_scratch) const;
+
+    void omp_driver(const char *in, char *out, const float *scale, int src_zp,
+            int dst_zp, const memory_tracking::grantor_t &scratchpad) const;
+
+    void reduce_compensation(char *out,
+            const int32_t *compensation_reduce_scratch, const int nthr,
+            const int N, const dim_t wspace_per_thr_size) const;
+
+    const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
+    std::unique_ptr<tr::kernel_t> kernel_;
+};
+
+struct jit_blk_reorder_t : public primitive_t {
+    using primitive_t::primitive_t;
+    struct pd_t : public cpu_reorder_pd_t {
+        using cpu_reorder_pd_t::cpu_reorder_pd_t;
+        DECLARE_COMMON_PD_T("jit:blk", jit_blk_reorder_t);
+
+        tr::prb_t prb_;
+
+    private:
+        static status_t create(reorder_pd_t **reorder_pd, engine_t *engine,
+                const primitive_attr_t *attr, engine_t *src_engine,
+                const memory_desc_t *src_md, engine_t *dst_engine,
+                const memory_desc_t *dst_md);
+
+        // Swap last two nodes, put block 4, 8, 16 nodes to first
+        static void prb_tile_normalize(tr::prb_t &p);
+        friend dnnl::impl::impl_list_item_t;
+    };
+
+    status_t init(engine_t *engine) override;
+    status_t execute(const exec_ctx_t &ctx) const override;
+
+    jit_blk_reorder_t(const pd_t *apd);
+    ~jit_blk_reorder_t();
+
+private:
+    size_t n(int d) const;
+    ptrdiff_t is(int d) const;
+    ptrdiff_t os(int d) const;
+
+    const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
+    std::unique_ptr<tr::jit_single_blk_kernel_t> kernel_;
+};
 
 } // namespace x64
 } // namespace cpu

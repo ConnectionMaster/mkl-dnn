@@ -1,6 +1,7 @@
 #===============================================================================
 # Copyright 2019-2021 Intel Corporation
 # Copyright 2020 Arm Ltd. and affiliates
+# Copyright 2021 FUJITSU LIMITED
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,6 +28,28 @@ foreach(SOURCE_FILE ${SOURCES_EXTRA})
     list(APPEND SOURCES "${SOURCE_FILE}")
 endforeach()
 
+if((DNNL_TARGET_ARCH STREQUAL "X64") OR (DNNL_TARGET_ARCH STREQUAL "AARCH64"))
+    file(GLOB_RECURSE SOURCES_JIT_UTILS
+        ${CMAKE_CURRENT_SOURCE_DIR}/jit_utils/*.[ch]
+        ${CMAKE_CURRENT_SOURCE_DIR}/jit_utils/*.[ch]pp
+    )
+    foreach(SOURCE_FILE ${SOURCES_JIT_UTILS})
+        list(APPEND SOURCES "${SOURCE_FILE}")
+    endforeach()
+endif()
+
+if(NOT DNNL_ENABLE_JIT_PROFILING)
+    # XXX: the profiling interface will still be built and present
+    add_definitions_with_host_compiler(-DDNNL_ENABLE_JIT_PROFILING=0)
+    # Don't enable support for linux_perf and VTune Amplifier
+    if((DNNL_TARGET_ARCH STREQUAL "X64") OR (DNNL_TARGET_ARCH STREQUAL "AARCH64"))
+        list(REMOVE_ITEM SOURCES_EXTRA
+            "${CMAKE_CURRENT_SOURCE_DIR}/jit_utils/jitprofiling/jitprofiling.c"
+            "${CMAKE_CURRENT_SOURCE_DIR}/jit_utils/linux_perf/linux_perf.cpp"
+            )
+    endif()
+endif()
+
 if(CMAKE_CXX_COMPILER_ID STREQUAL "Intel")
     # to make computations more stable and to align the jitted code
     # with the reference one use precise division and square root
@@ -51,18 +74,6 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Intel")
         set_source_files_properties(${FILES_REQUIRED_PREC_DIV}
             PROPERTIES COMPILE_FLAGS "-prec-div")
     endif()
-endif()
-
-if(MSVC AND (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC" OR CMAKE_CXX_COMPILER_ID STREQUAL "Intel"))
-    file(GLOB FILES_REQUIRED_BIGOBJ
-        ${CMAKE_CURRENT_SOURCE_DIR}/cpu_engine.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/reorder/cpu_reorder_regular_f32_f32.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/reorder/cpu_reorder_comp_f32_s8.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/reorder/cpu_reorder_comp_bf16_s8.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/reorder/cpu_reorder_comp_s8_s8.cpp
-        ${CMAKE_CURRENT_SOURCE_DIR}/cpu_convolution_list.cpp)
-    set_source_files_properties(${FILES_REQUIRED_BIGOBJ}
-        PROPERTIES COMPILE_FLAGS "/bigobj")
 endif()
 
 if(DNNL_WITH_SYCL)

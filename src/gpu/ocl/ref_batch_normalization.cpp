@@ -17,7 +17,6 @@
 #include "gpu/ocl/ref_batch_normalization.hpp"
 
 #include "common/c_types_map.hpp"
-#include "common/dnnl_thread.hpp"
 #include "common/dnnl_traits.hpp"
 #include "common/math_utils.hpp"
 #include "common/scratchpad.hpp"
@@ -39,6 +38,7 @@ static status_t init_conf_common(bnorm_conf_t &conf, offsets_t &off,
             pd->is_fwd() ? pd->src_md() : pd->diff_src_md());
     const int ndims = data_mdw.ndims();
 
+    conf = utils::zero<decltype(conf)>();
     conf.data_type = data_mdw.data_type();
 
     conf.ndims = ndims;
@@ -53,6 +53,8 @@ static status_t init_conf_common(bnorm_conf_t &conf, offsets_t &off,
     conf.is_backward = !pd->is_fwd();
 
     conf.use_scaleshift = pd->use_scaleshift();
+    conf.use_scale = pd->use_scale();
+    conf.use_shift = pd->use_shift();
     conf.save_stats = pd->is_training();
     conf.is_training = pd->is_training();
     conf.fuse_norm_relu = pd->fuse_norm_relu();
@@ -62,6 +64,8 @@ static status_t init_conf_common(bnorm_conf_t &conf, offsets_t &off,
     conf.calculate_diff_stats = !pd->use_global_stats();
     conf.diff_scaleshift
             = (pd->use_scaleshift() && bd.prop_kind == prop_kind::backward);
+    conf.diff_scale = (pd->use_scale() && bd.prop_kind == prop_kind::backward);
+    conf.diff_shift = (pd->use_shift() && bd.prop_kind == prop_kind::backward);
 
     set_offsets(data_mdw, off.src_off);
 
@@ -250,8 +254,12 @@ static status_t init_kernel_ctx_common(compute::kernel_ctx_t &kernel_ctx,
     kernel_ctx.define_int("FUSE_BN_RELU", conf.fuse_norm_relu);
     kernel_ctx.define_int("CALCULATE_STATS", conf.calculate_stats);
     kernel_ctx.define_int("USE_SCALESHIFT", conf.use_scaleshift);
+    kernel_ctx.define_int("USE_SCALE", conf.use_scale);
+    kernel_ctx.define_int("USE_SHIFT", conf.use_shift);
     kernel_ctx.define_int("CALCULATE_DIFF_STATS", conf.calculate_diff_stats);
     kernel_ctx.define_int("DIFF_SCALESHIFT", conf.diff_scaleshift);
+    kernel_ctx.define_int("DIFF_SCALE", conf.diff_scale);
+    kernel_ctx.define_int("DIFF_SHIFT", conf.diff_shift);
     kernel_ctx.define_int("VECTORIZE_CALC_STATS", conf.vectorize_calc_stats);
     kernel_ctx.define_int("SUB_GROUP_SIZE", conf.sub_group_size);
     kernel_ctx.define_int("VECT_SIZE", conf.vect_size);
@@ -295,6 +303,8 @@ status_t ref_batch_normalization_fwd_t::execute_forward(
         const exec_ctx_t &ctx) const {
 
     status_t status = status::success;
+    const auto &conf = pd()->conf;
+
     auto &src = CTX_IN_STORAGE(DNNL_ARG_SRC);
 
     auto &mean_ = pd()->stats_is_src()
@@ -307,14 +317,14 @@ status_t ref_batch_normalization_fwd_t::execute_forward(
             : CTX_OUT_CLEAN_STORAGE(DNNL_ARG_VARIANCE, status);
     CHECK(status);
 
-    auto &scaleshift = CTX_IN_STORAGE(DNNL_ARG_SCALE_SHIFT);
+    auto &scaleshift = CTX_IN_STORAGE(
+            conf.use_scale ? DNNL_ARG_SCALE : DNNL_ARG_SCALE_SHIFT);
+    auto &shift = CTX_IN_STORAGE(DNNL_ARG_SHIFT);
 
     auto &dst = CTX_OUT_CLEAN_STORAGE(DNNL_ARG_DST, status);
     CHECK(status);
     auto &ws = CTX_OUT_CLEAN_STORAGE(DNNL_ARG_WORKSPACE, status);
     CHECK(status);
-
-    const auto &conf = pd()->conf;
 
     auto *mean_ptr = &mean_;
     auto *variance_ptr = &variance_;
@@ -336,17 +346,28 @@ status_t ref_batch_normalization_fwd_t::execute_forward(
     auto &variance = *variance_ptr;
 
     if (conf.calculate_stats) {
-        compute::kernel_arg_list_t calc_mean_arg_list;
-        calc_mean_arg_list.set(0, src);
-        calc_mean_arg_list.set(1, conf.skip_reduce_stat ? mean : *temp_reduce);
+        if (conf.skip_reduce_stat) {
+            compute::kernel_arg_list_t calc_var_arg_list;
+            calc_var_arg_list.set(0, src);
+            calc_var_arg_list.set(1, mean);
+            calc_var_arg_list.set(2, variance);
 
-        auto nd_range_calc_mean = conf.dispatch_calc_stat.nd_range();
+            auto nd_range_calc_var = conf.dispatch_calc_stat.nd_range();
 
-        status = parallel_for(ctx, nd_range_calc_mean, calculate_mean_kernel_,
-                calc_mean_arg_list);
-        if (status != status::success) return status;
+            status = parallel_for(ctx, nd_range_calc_var,
+                    calculate_mean_variance_kernel_, calc_var_arg_list);
+            if (status != status::success) return status;
+        } else {
+            compute::kernel_arg_list_t calc_mean_arg_list;
+            calc_mean_arg_list.set(0, src);
+            calc_mean_arg_list.set(1, *temp_reduce);
 
-        if (!conf.skip_reduce_stat) {
+            auto nd_range_calc_mean = conf.dispatch_calc_stat.nd_range();
+
+            status = parallel_for(ctx, nd_range_calc_mean,
+                    calculate_mean_kernel_, calc_mean_arg_list);
+            if (status != status::success) return status;
+
             compute::kernel_arg_list_t reduce_mean_arg_list;
             reduce_mean_arg_list.set(0, *temp_reduce);
             reduce_mean_arg_list.set(1, mean);
@@ -356,21 +377,18 @@ status_t ref_batch_normalization_fwd_t::execute_forward(
             status = parallel_for(ctx, nd_range_reduce_mean,
                     reduce_mean_kernel_, reduce_mean_arg_list);
             if (status != status::success) return status;
-        }
 
-        compute::kernel_arg_list_t calc_var_arg_list;
-        calc_var_arg_list.set(0, src);
-        calc_var_arg_list.set(1, mean);
-        calc_var_arg_list.set(
-                2, conf.skip_reduce_stat ? variance : *temp_reduce);
+            compute::kernel_arg_list_t calc_var_arg_list;
+            calc_var_arg_list.set(0, src);
+            calc_var_arg_list.set(1, mean);
+            calc_var_arg_list.set(2, *temp_reduce);
 
-        auto nd_range_calc_var = conf.dispatch_calc_stat.nd_range();
+            auto nd_range_calc_var = conf.dispatch_calc_stat.nd_range();
 
-        status = parallel_for(ctx, nd_range_calc_var,
-                calculate_variance_kernel_, calc_var_arg_list);
-        if (status != status::success) return status;
+            status = parallel_for(ctx, nd_range_calc_var,
+                    calculate_variance_kernel_, calc_var_arg_list);
+            if (status != status::success) return status;
 
-        if (!conf.skip_reduce_stat) {
             compute::kernel_arg_list_t reduce_var_arg_list;
             reduce_var_arg_list.set(0, *temp_reduce);
             reduce_var_arg_list.set(1, variance);
@@ -389,8 +407,9 @@ status_t ref_batch_normalization_fwd_t::execute_forward(
     arg_list.set(2, variance);
     arg_list.set(3, dst);
     arg_list.set(4, scaleshift);
-    arg_list.set(5, ws);
-    arg_list.set(6, conf.eps);
+    arg_list.set(5, shift);
+    arg_list.set(6, ws);
+    arg_list.set(7, conf.eps);
 
     auto nd_range = conf.dispatch.nd_range();
 
@@ -425,28 +444,35 @@ status_t ref_batch_normalization_bwd_t::execute_backward(
         const exec_ctx_t &ctx) const {
 
     status_t status = status::success;
+    const auto &conf = pd()->conf;
 
     auto &src = CTX_IN_STORAGE(DNNL_ARG_SRC);
     auto &mean = CTX_IN_STORAGE(DNNL_ARG_MEAN);
     auto &variance = CTX_IN_STORAGE(DNNL_ARG_VARIANCE);
     auto &diff_dst = CTX_IN_STORAGE(DNNL_ARG_DIFF_DST);
-    auto &scaleshift = CTX_IN_STORAGE(DNNL_ARG_SCALE_SHIFT);
+    auto &scale = CTX_IN_STORAGE(
+            conf.use_scale ? DNNL_ARG_SCALE : DNNL_ARG_SCALE_SHIFT);
     auto &ws = CTX_IN_STORAGE(DNNL_ARG_WORKSPACE);
 
     auto &diff_src = CTX_OUT_CLEAN_STORAGE(DNNL_ARG_DIFF_SRC, status);
     CHECK(status);
-    auto &diff_scaleshift_
-            = CTX_OUT_CLEAN_STORAGE(DNNL_ARG_DIFF_SCALE_SHIFT, status);
+    auto &diff_scaleshift_ = CTX_OUT_CLEAN_STORAGE(
+            conf.diff_scale ? DNNL_ARG_DIFF_SCALE : DNNL_ARG_DIFF_SCALE_SHIFT,
+            status);
     CHECK(status);
-
-    const auto &conf = pd()->conf;
+    auto &diff_shift_ = CTX_OUT_CLEAN_STORAGE(DNNL_ARG_DIFF_SHIFT, status);
+    CHECK(status);
 
     std::unique_ptr<memory_storage_t> temp_reduce;
     temp_reduce = ctx.get_scratchpad_grantor().get_memory_storage(
             key_bnorm_reduction);
 
-    auto &diff_scaleshift
-            = (!conf.diff_scaleshift) ? *temp_reduce : diff_scaleshift_;
+    auto &diff_scaleshift = (!conf.diff_scaleshift && !conf.diff_scale)
+            ? *temp_reduce
+            : diff_scaleshift_;
+    auto &diff_shift = (!conf.diff_scaleshift && !conf.diff_shift)
+            ? *temp_reduce
+            : diff_shift_;
 
     compute::kernel_arg_list_t calc_stats_arg_list;
     calc_stats_arg_list.set(0, src);
@@ -464,8 +490,9 @@ status_t ref_batch_normalization_bwd_t::execute_backward(
     compute::kernel_arg_list_t reduce_stats_arg_list;
     reduce_stats_arg_list.set(0, *temp_reduce);
     reduce_stats_arg_list.set(1, diff_scaleshift);
-    reduce_stats_arg_list.set(2, variance);
-    reduce_stats_arg_list.set(3, conf.eps);
+    reduce_stats_arg_list.set(2, diff_shift);
+    reduce_stats_arg_list.set(3, variance);
+    reduce_stats_arg_list.set(4, conf.eps);
 
     auto nd_range_reduce_stat = conf.dispatch_reduce_stat.nd_range();
 
@@ -478,11 +505,12 @@ status_t ref_batch_normalization_bwd_t::execute_backward(
     arg_list.set(1, mean);
     arg_list.set(2, variance);
     arg_list.set(3, diff_dst);
-    arg_list.set(4, scaleshift);
+    arg_list.set(4, scale);
     arg_list.set(5, ws);
     arg_list.set(6, diff_src);
     arg_list.set(7, diff_scaleshift);
-    arg_list.set(8, conf.eps);
+    arg_list.set(8, diff_shift);
+    arg_list.set(9, conf.eps);
 
     nd_range = conf.dispatch.nd_range();
 

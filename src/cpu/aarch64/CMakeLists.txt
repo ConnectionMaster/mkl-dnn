@@ -1,6 +1,6 @@
 #*******************************************************************************
 # Copyright 2020 Arm Ltd. and affiliates
-# Copyright 2020 FUJITSU LIMITED
+# Copyright 2020-2021 FUJITSU LIMITED
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,6 +20,12 @@ file(GLOB_RECURSE SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/*.[ch]pp
     )
 
+file(GLOB XBYAK_AARCH64_FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/xbyak_aarch64/src/xbyak_aarch64_impl.cpp
+    )
+
+list(REMOVE_ITEM SOURCES ${XBYAK_AARCH64_FILES})
+
 if(NOT DNNL_AARCH64_USE_ACL)
     file(GLOB_RECURSE ACL_FILES
         ${CMAKE_CURRENT_SOURCE_DIR}/acl_*.[ch]
@@ -32,3 +38,5 @@ set(OBJ_LIB ${LIB_NAME}_cpu_aarch64)
 add_library(${OBJ_LIB} OBJECT ${SOURCES})
 set_property(GLOBAL APPEND PROPERTY DNNL_LIB_DEPS
     $<TARGET_OBJECTS:${OBJ_LIB}>)
+
+add_subdirectory(xbyak_aarch64)

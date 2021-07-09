@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -68,7 +68,7 @@ void check_correctness(const settings_t &s) {
         bool want_perf_report = false;
         parse_result(res, want_perf_report, status, pstr);
 
-        if (want_perf_report && bench_mode & PERF) {
+        if (want_perf_report && is_bench_mode(PERF)) {
             perf_report_t pr(s.perf_template);
             pr.report(&prb, &res, pstr);
         }
@@ -106,7 +106,7 @@ int bench(int argc, char **argv) {
             catch_unknown_options(argv[0]);
 
             bool is_deconv = false;
-            SAFE_V(str2desc(&s.desc, argv[0], is_deconv));
+            SAFE(str2desc(&s.desc, argv[0], is_deconv), CRIT);
             check_correctness(s);
         }
     }

@@ -21,6 +21,7 @@
 #include "common/type_helpers.hpp"
 #include "common/utils.hpp"
 
+#include "cpu/platform.hpp"
 #include "cpu/x64/injectors/injector_utils.hpp"
 #include "cpu/x64/injectors/jit_uni_binary_injector.hpp"
 #include "cpu/x64/injectors/jit_uni_eltwise_injector.hpp"
@@ -130,11 +131,13 @@ void iterate(const int nb_oc_block, const int ur_w, const F &f) {
 template <cpu_isa_t isa, typename Vmm>
 void _jit_uni_x8s8s32x_fwd_kernel<isa, Vmm>::apply_sum(const int nb_oc_block,
         const int ur_w, const bool last_oc_block_flag, const int oc_block,
-        const float *p_sum_scale) {
+        const float *p_sum_scale, const int32_t *p_sum_zp) {
     if (jcp.with_sum) {
-        assert(p_sum_scale != nullptr && "p_sum_scale = nullptr");
+        assert(!utils::any_null(p_sum_scale, p_sum_zp)
+                && "p_sum_scale or p_sum_zp = nullptr");
         const float sum_scale = *p_sum_scale;
-        const auto sum_injector_lam = [this, oc_block, sum_scale](
+        const int32_t sum_zp = *p_sum_zp;
+        const auto sum_injector_lam = [this, oc_block, sum_scale, sum_zp](
                                               const bool mask_flag, const int k,
                                               const int j) {
             const int aux_output_offset = jcp.typesize_out
@@ -142,6 +145,11 @@ void _jit_uni_x8s8s32x_fwd_kernel<isa, Vmm>::apply_sum(const int nb_oc_block,
             cvt2ps(jcp.dst_dt, vmm_prev_dst, reg_out, aux_output_offset,
                     mask_flag ? get_tail_size() : get_blocking_size());
             const Vmm vmm = vmm_out(j, k);
+            if (sum_zp != 0) {
+                uni_vbroadcastss(vmm_tmp, ptr[reg_ptr_sum_zp]);
+                uni_vcvtdq2ps(vmm_tmp, vmm_tmp);
+                uni_vsubps(vmm_prev_dst, vmm_prev_dst, vmm_tmp);
+            }
             if (sum_scale == 1.f)
                 uni_vaddps(vmm, vmm, vmm_prev_dst);
             else {
@@ -152,7 +160,10 @@ void _jit_uni_x8s8s32x_fwd_kernel<isa, Vmm>::apply_sum(const int nb_oc_block,
         const auto sum_injector = [=]() {
             iterate(nb_oc_block, ur_w, last_oc_block_flag, sum_injector_lam);
         };
-        if (*p_sum_scale != 1.f) mov(reg_ptr_sum_scale, (size_t)p_sum_scale);
+        if (*p_sum_scale != 1.f)
+            mov(reg_ptr_sum_scale, reinterpret_cast<size_t>(p_sum_scale));
+        if (*p_sum_zp != 0)
+            mov(reg_ptr_sum_zp, reinterpret_cast<size_t>(p_sum_zp));
         postops_injector_->set_lambda_injector(
                 primitive_kind::sum, sum_injector);
     }
@@ -161,9 +172,11 @@ void _jit_uni_x8s8s32x_fwd_kernel<isa, Vmm>::apply_sum(const int nb_oc_block,
 template <cpu_isa_t isa, typename Vmm>
 void _jit_uni_x8s8s32x_fwd_kernel<isa, Vmm>::apply_postops(
         const int nb_oc_block, const int ur_w, const bool last_oc_block_flag,
-        const int oc_block, const float *p_sum_scale) {
+        const int oc_block, const float *p_sum_scale, const int32_t *p_sum_zp) {
     if (jcp.with_eltwise || jcp.with_binary || jcp.with_sum) {
-        apply_sum(nb_oc_block, ur_w, last_oc_block_flag, oc_block, p_sum_scale);
+        if (jcp.with_sum && *p_sum_zp != 0) push(reg_ptr_sum_zp);
+        apply_sum(nb_oc_block, ur_w, last_oc_block_flag, oc_block, p_sum_scale,
+                p_sum_zp);
 
         vmm_index_set_t vmm_idxs;
         binary_injector::rhs_arg_dynamic_params_t rhs_arg_params;
@@ -195,6 +208,7 @@ void _jit_uni_x8s8s32x_fwd_kernel<isa, Vmm>::apply_postops(
                     });
 
         postops_injector_->compute_vector_range(vmm_idxs, rhs_arg_params);
+        if (jcp.with_sum && *p_sum_zp != 0) pop(reg_ptr_sum_zp);
     }
 }
 
@@ -219,9 +233,11 @@ void _jit_uni_x8s8s32x_fwd_kernel<isa, Vmm>::store_output(
     const auto &p = attr_.post_ops_;
     const int sum_idx = p.find(primitive_kind::sum);
     const float *p_sum_scale = nullptr;
+    const int32_t *p_sum_zp = nullptr;
     if (sum_idx != -1) {
         const auto &p_entry = p.entry_[sum_idx];
         p_sum_scale = &p_entry.sum.scale;
+        p_sum_zp = &p_entry.sum.zero_point;
     }
     if (jcp.signed_input && jcp.ver != ver_vnni) {
         /* put 'wei_adj_scale = 0.5' for bias calculation */
@@ -277,7 +293,8 @@ void _jit_uni_x8s8s32x_fwd_kernel<isa, Vmm>::store_output(
         }
     }
 
-    apply_postops(nb_oc_block, ur_w, last_oc_block_flag, oc_block, p_sum_scale);
+    apply_postops(nb_oc_block, ur_w, last_oc_block_flag, oc_block, p_sum_scale,
+            p_sum_zp);
 
     if (jcp.dst_zero_point) {
         mov(reg_dst_zero_point, ptr[param1 + GET_OFF(dst_zero_point)]);
@@ -1208,7 +1225,7 @@ template <cpu_isa_t isa>
 status_t jit_uni_x8s8s32x_fwd_kernel<isa>::init_conf(jit_conv_conf_t &jcp,
         const convolution_desc_t &cd, memory_desc_t &src_md,
         memory_desc_t &weights_md, memory_desc_t &dst_md,
-        memory_desc_t &bias_md, const primitive_attr_t &attr, int nthreads) {
+        memory_desc_t &bias_md, primitive_attr_t &attr, int nthreads) {
     using namespace prop_kind;
 
     const memory_desc_wrapper src_d(&src_md);
@@ -1317,22 +1334,6 @@ status_t jit_uni_x8s8s32x_fwd_kernel<isa>::init_conf(jit_conv_conf_t &jcp,
             return status::unimplemented;
     }
 
-    const auto &post_ops = attr.post_ops_;
-
-    const int eltwise_ind = post_ops.find(primitive_kind::eltwise);
-    jcp.with_eltwise = eltwise_ind != -1;
-    const int binary_ind = post_ops.find(primitive_kind::binary);
-    jcp.with_binary = binary_ind != -1;
-    const int sum_ind = post_ops.find(primitive_kind::sum);
-    jcp.with_sum = sum_ind != -1;
-
-    jcp.post_ops = post_ops;
-
-    using namespace injector;
-    const bool post_ops_ok_
-            = post_ops_ok({isa, {eltwise, binary, sum}, jcp.post_ops, &dst_d});
-    if (!post_ops_ok_) return status::unimplemented;
-
     jcp.is_resrc_depthwise = true && jcp.is_depthwise && jcp.stride_w < jcp.kw
             && jcp.kw < 4 && jcp.dilate_w == 0;
 
@@ -1429,6 +1430,27 @@ status_t jit_uni_x8s8s32x_fwd_kernel<isa>::init_conf(jit_conv_conf_t &jcp,
     }
     jcp.bia_dt = jcp.with_bias ? cd.bias_desc.data_type : data_type::undef;
     jcp.dst_dt = cd.dst_desc.data_type;
+
+    CHECK(attr.set_default_formats(&dst_md));
+
+    const auto &post_ops = attr.post_ops_;
+
+    const int eltwise_ind = post_ops.find(primitive_kind::eltwise);
+    jcp.with_eltwise = eltwise_ind != -1;
+    const int binary_ind = post_ops.find(primitive_kind::binary);
+    jcp.with_binary = binary_ind != -1;
+    const int sum_ind = post_ops.find(primitive_kind::sum);
+    jcp.with_sum = sum_ind != -1;
+
+    jcp.post_ops = post_ops;
+
+    using namespace injector;
+
+    const bool post_ops_ok_ = post_ops_ok({isa, {eltwise, binary, sum},
+            jcp.post_ops, &dst_d, false, false, false,
+            {broadcasting_strategy_t::scalar,
+                    broadcasting_strategy_t::per_oc}});
+    if (!post_ops_ok_) return status::unimplemented;
 
     jcp.typesize_in = types::data_type_size(src_d.data_type());
     jcp.typesize_out = types::data_type_size(dst_d.data_type());

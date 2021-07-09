@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -365,6 +365,8 @@
 #define VECT_BLOCK_WRITE BLOCK_WRITE
 #define VECT_UINT_READ intel_sub_group_block_read
 #define VECT_UINT_WRITE intel_sub_group_block_write
+#define VECT_UCHAR_READ intel_sub_group_block_read_uc
+#define VECT_UCHAR_WRITE intel_sub_group_block_write_uc
 #define VECT_BLOCK_DATA_T BLOCK_DATA_T
 #define AS_VECT_BLOCK_DATA_T AS_BLOCK_DATA_T
 #define CONVERT_VECT_FLOAT_T CONVERT_FLOAT_T
@@ -372,9 +374,11 @@
 #define VECT_INT_T int
 #define VECT_UINT_T uint
 #define VECT_FLOAT_T float
+#define VECT_CHAR_T char
 #define AS_VECT_INT_T as_int
 #define AS_VECT_UINT_T as_uint
 #define AS_VECT_FLOAT_T as_float
+#define AS_VECT_CHAR_T as_char
 #elif VECT_DT_N == 2
 #define VECT_DATA_T DATA2_T
 #define VECT_DEF_ACC_DATA_T DEF_ACC_DATA2_T
@@ -383,6 +387,8 @@
 #define VECT_BLOCK_WRITE BLOCK_WRITE2
 #define VECT_UINT_READ intel_sub_group_block_read2
 #define VECT_UINT_WRITE intel_sub_group_block_write2
+#define VECT_UCHAR_READ intel_sub_group_block_read_uc2
+#define VECT_UCHAR_WRITE intel_sub_group_block_write_uc2
 #define VECT_BLOCK_DATA_T BLOCK_DATA2_T
 #define AS_VECT_BLOCK_DATA_T AS_BLOCK_DATA2_T
 #define CONVERT_VECT_FLOAT_T CONVERT_FLOAT2_T
@@ -390,9 +396,11 @@
 #define VECT_INT_T int2
 #define VECT_UINT_T uint2
 #define VECT_FLOAT_T float2
+#define VECT_CHAR_T char2
 #define AS_VECT_INT_T as_int2
 #define AS_VECT_UINT_T as_uint2
 #define AS_VECT_FLOAT_T as_float2
+#define AS_VECT_CHAR_T as_char2
 #elif VECT_DT_N == 4
 #define VECT_DATA_T DATA4_T
 #define VECT_DEF_ACC_DATA_T DEF_ACC_DATA4_T
@@ -401,6 +409,8 @@
 #define VECT_BLOCK_WRITE BLOCK_WRITE4
 #define VECT_UINT_READ intel_sub_group_block_read4
 #define VECT_UINT_WRITE intel_sub_group_block_write4
+#define VECT_UCHAR_READ intel_sub_group_block_read_uc4
+#define VECT_UCHAR_WRITE intel_sub_group_block_write_uc4
 #define VECT_BLOCK_DATA_T BLOCK_DATA4_T
 #define AS_VECT_BLOCK_DATA_T AS_BLOCK_DATA4_T
 #define CONVERT_VECT_FLOAT_T CONVERT_FLOAT4_T
@@ -408,9 +418,11 @@
 #define VECT_INT_T int4
 #define VECT_UINT_T uint4
 #define VECT_FLOAT_T float4
+#define VECT_CHAR_T char4
 #define AS_VECT_INT_T as_int4
 #define AS_VECT_UINT_T as_uint4
 #define AS_VECT_FLOAT_T as_float4
+#define AS_VECT_CHAR_T as_char4
 #elif VECT_DT_N == 8
 #define VECT_DATA_T DATA8_T
 #define VECT_DEF_ACC_DATA_T DEF_ACC_DATA8_T
@@ -419,6 +431,8 @@
 #define VECT_BLOCK_WRITE BLOCK_WRITE8
 #define VECT_UINT_READ intel_sub_group_block_read8
 #define VECT_UINT_WRITE intel_sub_group_block_write8
+#define VECT_UCHAR_READ intel_sub_group_block_read_uc8
+#define VECT_UCHAR_WRITE intel_sub_group_block_write_uc8
 #define VECT_BLOCK_DATA_T BLOCK_DATA8_T
 #define AS_VECT_BLOCK_DATA_T AS_BLOCK_DATA8_T
 #define CONVERT_VECT_FLOAT_T CONVERT_FLOAT8_T
@@ -426,10 +440,16 @@
 #define VECT_INT_T int8
 #define VECT_UINT_T uint8
 #define VECT_FLOAT_T float8
+#define VECT_CHAR_T char8
 #define AS_VECT_INT_T as_int8
 #define AS_VECT_UINT_T as_uint8
 #define AS_VECT_FLOAT_T as_float8
+#define AS_VECT_CHAR_T as_char8
 #endif
+
+#define AS_MMAD_DATA_T CONCAT2(as_, MMAD_DATA_T)
+#define AS_MMAD_DATA4_T CONCAT2(as_, MMAD_DATA4_T)
+#define AS_MMAD_DATA8_T CONCAT2(as_, MMAD_DATA8_T)
 
 #ifdef SRC_DATA_T
 #define SRC_DATA2_T CONCAT2(SRC_DATA_T, 2)
@@ -437,20 +457,20 @@
 #define SRC_DATA8_T CONCAT2(SRC_DATA_T, 8)
 #define SRC_DATA16_T CONCAT2(SRC_DATA_T, 16)
 #ifdef SRC_DT_U8
-#define MMAD_DATA_T uint
-#define MMAD_DATA4_T uint4
-#define MMAD_DATA8_T uint8
+#define SRC_MMAD_DATA_T uint
+#define SRC_MMAD_DATA4_T uint4
+#define SRC_MMAD_DATA8_T uint8
 #elif SRC_DT_S8
-#define MMAD_DATA_T int
-#define MMAD_DATA4_T int4
-#define MMAD_DATA8_T int8
+#define SRC_MMAD_DATA_T int
+#define SRC_MMAD_DATA4_T int4
+#define SRC_MMAD_DATA8_T int8
 #endif
 #define AS_SRC_DATA2_T CONCAT2(as_, SRC_DATA2_T)
 #define AS_SRC_DATA4_T CONCAT2(as_, SRC_DATA4_T)
 #define AS_SRC_DATA16_T CONCAT2(as_, SRC_DATA16_T)
-#define AS_MMAD_DATA_T CONCAT2(as_, MMAD_DATA_T)
-#define AS_MMAD_DATA4_T CONCAT2(as_, MMAD_DATA4_T)
-#define AS_MMAD_DATA8_T CONCAT2(as_, MMAD_DATA8_T)
+#define AS_SRC_MMAD_DATA_T CONCAT2(as_, SRC_MMAD_DATA_T)
+#define AS_SRC_MMAD_DATA4_T CONCAT2(as_, SRC_MMAD_DATA4_T)
+#define AS_SRC_MMAD_DATA8_T CONCAT2(as_, SRC_MMAD_DATA8_T)
 #if SRC_DT_BF16
 #define SRC_TO_REF(x) cvt_bf16_to_f32(x)
 #define SRC_TO_REF8(x) cvt_bf16_to_f32(x)
@@ -587,25 +607,48 @@
 #define DST_DATA8_T CONCAT2(DST_DATA_T, 8)
 #define DST_DATA16_T CONCAT2(DST_DATA_T, 16)
 
+#define AS_DST_DATA_T CONCAT2(as_, DST_DATA_T)
 #define AS_DST_DATA2_T CONCAT2(as_, DST_DATA2_T)
 #define AS_DST_DATA4_T CONCAT2(as_, DST_DATA4_T)
 #define AS_DST_DATA8_T CONCAT2(as_, DST_DATA8_T)
 #define AS_DST_DATA16_T CONCAT2(as_, DST_DATA16_T)
 
 #if DST_DT_F32 || DST_DT_F16
+#define CONVERT_DST_DATA_T CONCAT2(convert_, DST_DATA_T)
 #define CONVERT_DST_DATA2_T CONCAT2(convert_, DST_DATA2_T)
 #define CONVERT_DST_DATA4_T CONCAT2(convert_, DST_DATA4_T)
 #define CONVERT_DST_DATA8_T CONCAT2(convert_, DST_DATA8_T)
 #define CONVERT_DST_DATA16_T CONCAT2(convert_, DST_DATA16_T)
 #else
+#define CONVERT_DST_DATA_T CONCAT3(convert_, DST_DATA_T, _sat_rte)
 #define CONVERT_DST_DATA2_T CONCAT3(convert_, DST_DATA2_T, _sat_rte)
 #define CONVERT_DST_DATA4_T CONCAT3(convert_, DST_DATA4_T, _sat_rte)
 #define CONVERT_DST_DATA8_T CONCAT3(convert_, DST_DATA8_T, _sat_rte)
 #define CONVERT_DST_DATA16_T CONCAT3(convert_, DST_DATA16_T, _sat_rte)
 #endif
 
+#if DST_DT_U8
+#define MMAD_DATA_T uint
+#define MMAD_DATA4_T uint4
+#define MMAD_DATA8_T uint8
+#elif DST_DT_S8
+#define MMAD_DATA_T int
+#define MMAD_DATA4_T int4
+#define MMAD_DATA8_T int8
+#endif
+
 // Block read/write macros for dst.
 #if DST_DT_U8 || DST_DT_S8
+
+#define BLOCK_READ_DST(ptr) \
+    AS_DST_DATA_T(intel_sub_group_block_read_uc((__global uchar *)ptr))
+#define BLOCK_WRITE_DST(ptr, v) \
+    intel_sub_group_block_write_uc((__global uchar *)ptr, as_uchar(v))
+
+#define BLOCK_READ_DST2(ptr) \
+    AS_DST_DATA2_T(intel_sub_group_block_read_uc2((__global uchar *)ptr))
+#define BLOCK_WRITE_DST2(ptr, v) \
+    intel_sub_group_block_write_uc2((__global uchar *)ptr, as_uchar2(v))
 
 #define BLOCK_READ_DST4(ptr) \
     AS_DST_DATA4_T(intel_sub_group_block_read_uc4((__global uchar *)ptr))
@@ -624,6 +667,16 @@
 
 #elif DST_DT_S32 || DST_DT_F32
 
+#define BLOCK_READ_DST(ptr) \
+    AS_DST_DATA_T(intel_sub_group_block_read((__global uint *)ptr))
+#define BLOCK_WRITE_DST(ptr, v) \
+    intel_sub_group_block_write((__global uint *)ptr, as_uint(v))
+
+#define BLOCK_READ_DST2(ptr) \
+    AS_DST_DATA2_T(intel_sub_group_block_read2((__global uint *)ptr))
+#define BLOCK_WRITE_DST2(ptr, v) \
+    intel_sub_group_block_write2((__global uint *)ptr, as_uint2(v))
+
 #define BLOCK_READ_DST4(ptr) \
     AS_DST_DATA4_T(intel_sub_group_block_read4((__global uint *)ptr))
 #define BLOCK_WRITE_DST4(ptr, v) \
@@ -633,6 +686,37 @@
     AS_DST_DATA8_T(intel_sub_group_block_read8((__global uint *)ptr))
 #define BLOCK_WRITE_DST8(ptr, v) \
     intel_sub_group_block_write8((__global uint *)ptr, as_uint8(v))
+
+#define BLOCK_READ_DST16(ptr) \
+    (DST_DATA16_T)( \
+            BLOCK_READ_DST8(ptr), BLOCK_READ_DST8(ptr + 8 * SUB_GROUP_SIZE))
+#define BLOCK_WRITE_DST16(ptr, v) \
+    do { \
+        BLOCK_WRITE_DST8(ptr, (v).s01234567); \
+        BLOCK_WRITE_DST8(ptr + 8 * SUB_GROUP_SIZE, (v).s89abcdef); \
+    } while (0)
+
+#elif DST_DT_F16
+
+#define BLOCK_READ_DST(ptr) \
+    AS_DST_DATA_T(intel_sub_group_block_read_us((__global ushort *)ptr))
+#define BLOCK_WRITE_DST(ptr, v) \
+    intel_sub_group_block_write_us((__global ushort *)ptr, as_ushort(v))
+
+#define BLOCK_READ_DST2(ptr) \
+    AS_DST_DATA2_T(intel_sub_group_block_read_us2((__global ushort *)ptr))
+#define BLOCK_WRITE_DST2(ptr, v) \
+    intel_sub_group_block_write_us2((__global ushort *)ptr, as_short2(v))
+
+#define BLOCK_READ_DST4(ptr) \
+    AS_DST_DATA4_T(intel_sub_group_block_read_us4((__global ushort *)ptr))
+#define BLOCK_WRITE_DST4(ptr, v) \
+    intel_sub_group_block_write_us4((__global ushort *)ptr, as_ushort4(v))
+
+#define BLOCK_READ_DST8(ptr) \
+    AS_DST_DATA8_T(intel_sub_group_block_read_us8((__global ushort *)ptr))
+#define BLOCK_WRITE_DST8(ptr, v) \
+    intel_sub_group_block_write_us8((__global ushort *)ptr, as_ushort8(v))
 
 #define BLOCK_READ_DST16(ptr) \
     (DST_DATA16_T)( \

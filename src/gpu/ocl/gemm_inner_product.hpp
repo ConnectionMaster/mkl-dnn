@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -37,6 +37,7 @@ namespace gpu {
 namespace ocl {
 
 struct gemm_inner_product_fwd_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_inner_product_fwd_pd_t {
         pd_t(const inner_product_desc_t *adesc, const primitive_attr_t *attr,
                 const inner_product_fwd_pd_t *hint_fwd_pd)
@@ -53,24 +54,24 @@ struct gemm_inner_product_fwd_t : public gpu_primitive_t {
             using namespace data_type;
             using namespace prop_kind;
             using namespace data_type;
-
             assert(engine->kind() == engine_kind::gpu);
 
-            attr_info_ = attr_info_t::create(attr());
+            const auto attr_skip_mask
+                    = primitive_attr_t::skip_mask_t::oscale_runtime
+                    | primitive_attr_t::skip_mask_t::post_ops;
 
             bool ok = is_fwd() && set_default_params() == status::success
                     && !has_zero_dim_memory()
-                    && utils::one_of(true,
-                            expect_data_types(f16, f16, f16, f16, f16),
-                            expect_data_types(f32, f32, f32, f32, f32))
-                    && attr()->post_ops_.len() <= 2
-                    && IMPLICATION(attr()->post_ops_.len() == 2,
-                            attr()->post_ops_.find(dnnl_sum) == 0)
-
                     && dense_consistency_check(src_md(), weights_md(), dst_md())
                     && dense_gemm_consistency_check(
-                            src_md(), weights_md(), dst_md());
+                            src_md(), weights_md(), dst_md())
+                    && attr()->has_default_values(attr_skip_mask)
+                    && post_ops_with_binary_ok(
+                            attr(), desc()->dst_desc.data_type)
+                    && attr_.set_default_formats(dst_md(0)) == status::success;
             if (!ok) return status::unimplemented;
+
+            attr_info_ = attr_info_t::create(attr());
 
             memory_desc_t a_md, b_md, c_md;
             init_2d_desc(&a_md, src_md());
@@ -87,7 +88,7 @@ struct gemm_inner_product_fwd_t : public gpu_primitive_t {
         }
 
         attr_info_t attr_info_ = {};
-        std::unique_ptr<primitive_desc_t> gemm_pd_;
+        std::shared_ptr<primitive_desc_t> gemm_pd_;
 
     private:
         void init_scratchpad() {
@@ -96,8 +97,6 @@ struct gemm_inner_product_fwd_t : public gpu_primitive_t {
                     gemm_pd_->scratchpad_registry());
         }
     };
-
-    gemm_inner_product_fwd_t(const pd_t *apd) : gpu_primitive_t(apd) {}
 
     status_t init(engine_t *engine) override {
         status_t gemm_status = pd()->gemm_pd_->create_primitive(gemm_, engine);
@@ -123,6 +122,7 @@ private:
 };
 
 struct gemm_inner_product_bwd_data_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_inner_product_bwd_data_pd_t {
         pd_t(const inner_product_desc_t *adesc, const primitive_attr_t *attr,
                 const inner_product_fwd_pd_t *hint_fwd_pd)
@@ -143,7 +143,9 @@ struct gemm_inner_product_bwd_data_t : public gpu_primitive_t {
             bool ok = this->desc()->prop_kind == backward_data
                     && set_default_params() == status::success
                     && !has_zero_dim_memory()
-                    && expect_data_types(f32, f32, data_type::undef, f32, f32)
+                    && utils::one_of(weights_md()->data_type, f32, bf16)
+                    && utils::one_of(diff_src_md()->data_type, f32, bf16)
+                    && utils::one_of(diff_dst_md()->data_type, f32, bf16)
                     && attr()->has_default_values()
                     && dense_consistency_check(
                             diff_src_md(), weights_md(), diff_dst_md())
@@ -166,7 +168,7 @@ struct gemm_inner_product_bwd_data_t : public gpu_primitive_t {
             return status::success;
         }
 
-        std::unique_ptr<primitive_desc_t> gemm_pd_;
+        std::shared_ptr<primitive_desc_t> gemm_pd_;
 
     private:
         void init_scratchpad() {
@@ -175,8 +177,6 @@ struct gemm_inner_product_bwd_data_t : public gpu_primitive_t {
                     gemm_pd_->scratchpad_registry());
         }
     };
-
-    gemm_inner_product_bwd_data_t(const pd_t *apd) : gpu_primitive_t(apd) {}
 
     status_t init(engine_t *engine) override {
         status_t gemm_status = pd()->gemm_pd_->create_primitive(gemm_, engine);
@@ -201,6 +201,7 @@ private:
 };
 
 struct gemm_inner_product_bwd_weights_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     using gpu_ip_bwd_weights_pd_t = gpu_inner_product_bwd_weights_pd_t;
     struct pd_t : public gpu_ip_bwd_weights_pd_t {
         pd_t(const inner_product_desc_t *adesc, const primitive_attr_t *attr,
@@ -222,7 +223,9 @@ struct gemm_inner_product_bwd_weights_t : public gpu_primitive_t {
             bool ok = this->desc()->prop_kind == backward_weights
                     && set_default_params() == status::success
                     && !has_zero_dim_memory()
-                    && expect_data_types(f32, f32, f32, f32, f32)
+                    && utils::one_of(diff_weights_md()->data_type, f32, bf16)
+                    && utils::one_of(src_md()->data_type, f32, bf16)
+                    && utils::one_of(diff_dst_md()->data_type, f32, bf16)
                     && attr()->has_default_values()
                     && dense_consistency_check(
                             src_md(), diff_weights_md(), diff_dst_md())
@@ -244,7 +247,7 @@ struct gemm_inner_product_bwd_weights_t : public gpu_primitive_t {
             bool gemm_ok = false;
             gemm_ok = status::success
                     == create_gemm_pd(gemm_pd_, engine, &a_md, &b_md, &c_md,
-                            &glob_zero_md, c_md.data_type, attr());
+                            &glob_zero_md, desc()->accum_data_type, attr());
 
             if (!gemm_ok) return status::unimplemented;
             init_scratchpad();
@@ -257,7 +260,7 @@ struct gemm_inner_product_bwd_weights_t : public gpu_primitive_t {
             return wmd.format_desc.blocking.strides[0] == 1;
         }
 
-        std::unique_ptr<primitive_desc_t> gemm_pd_;
+        std::shared_ptr<primitive_desc_t> gemm_pd_;
 
     private:
         void init_scratchpad() {
@@ -267,8 +270,6 @@ struct gemm_inner_product_bwd_weights_t : public gpu_primitive_t {
         }
     };
 
-    gemm_inner_product_bwd_weights_t(const pd_t *apd) : gpu_primitive_t(apd) {}
-
     status_t init(engine_t *engine) override {
         status_t gemm_status = pd()->gemm_pd_->create_primitive(gemm_, engine);
         if (gemm_status != status::success) return gemm_status;
@@ -277,6 +278,8 @@ struct gemm_inner_product_bwd_weights_t : public gpu_primitive_t {
             compute::kernel_ctx_t kernel_ctx;
 
             kernel_ctx.set_data_type(pd()->src_md()->data_type);
+            def_data_type(
+                    kernel_ctx, pd()->diff_weights_md(1)->data_type, "BIA");
             kernel_ctx.define_int("MB", pd()->MB());
             kernel_ctx.define_int("OC", pd()->OC());
 

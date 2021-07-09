@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -13,6 +13,8 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 *******************************************************************************/
+
+#include <CL/sycl/backend/opencl.hpp>
 
 #include "sycl/sycl_device_info.hpp"
 #include "sycl/sycl_gpu_engine.hpp"
@@ -49,12 +51,14 @@ status_t sycl_device_info_t::init_arch(engine_t *engine) {
     if (be == backend_t::opencl) {
         cl_int err = CL_SUCCESS;
 
-        cl_device_id ocl_device = device.get();
-        auto context = gpu::ocl::make_ocl_wrapper(clCreateContext(
-                nullptr, 1, &ocl_device, nullptr, nullptr, &err));
+        auto ocl_dev_wrapper = gpu::ocl::make_ocl_wrapper(device.get());
+
+        auto ocl_dev = ocl_dev_wrapper.get();
+        auto ocl_ctx_wrapper = gpu::ocl::make_ocl_wrapper(
+                clCreateContext(nullptr, 1, &ocl_dev, nullptr, nullptr, &err));
         OCL_CHECK(err);
 
-        gpu_arch_ = gpu::ocl::detect_gpu_arch(ocl_device, context);
+        gpu_arch_ = gpu::ocl::detect_gpu_arch(ocl_dev_wrapper, ocl_ctx_wrapper);
     } else if (be == backend_t::level0) {
         // TODO: add support for L0 binary ngen check
         // XXX: query from ocl_engine for now
@@ -63,8 +67,10 @@ status_t sycl_device_info_t::init_arch(engine_t *engine) {
         engine_t *engine;
         CHECK(f.engine_create(&engine, 0));
 
-        std::unique_ptr<gpu::compute::compute_engine_t> compute_engine(
-                utils::downcast<gpu::compute::compute_engine_t *>(engine));
+        std::unique_ptr<gpu::compute::compute_engine_t, engine_deleter_t>
+                compute_engine(
+                        utils::downcast<gpu::compute::compute_engine_t *>(
+                                engine));
 
         auto *dev_info = compute_engine->device_info();
         gpu_arch_ = dev_info->gpu_arch();

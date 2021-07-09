@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -36,6 +36,7 @@ namespace gpu {
 namespace ocl {
 
 struct gen9_convolution_fwd_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_convolution_fwd_pd_t {
         pd_t(const convolution_desc_t *adesc, const primitive_attr_t *attr,
                 const convolution_fwd_pd_t *hint_fwd_pd)
@@ -61,6 +62,8 @@ struct gen9_convolution_fwd_t : public gpu_primitive_t {
                     && this->desc()->alg_kind == alg_kind::convolution_direct
                     && utils::one_of(true,
                             expect_data_types(f32, f32, f32, f32, f32),
+                            expect_data_types(f32, f32, f32, s8, f32),
+                            expect_data_types(f16, f16, f16, s8, f16),
                             expect_data_types(f16, f16, f16, f16, f16))
                     && compute_engine->mayiuse(
                             compute::device_ext_t::intel_subgroups)
@@ -76,12 +79,15 @@ struct gen9_convolution_fwd_t : public gpu_primitive_t {
                     && post_ops_with_binary_ok(attr(), dst_md()->data_type);
             if (!ok) return status::unimplemented;
 
-            status_t status = init_conf();
-            if (status != status::success) return status;
+            CHECK(init_conf());
 
             ok = set_default_formats_common(
                     conf.src_tag, conf.wei_tag, conf.dst_tag);
-            return ok ? status::success : status::unimplemented;
+            if (!ok) return status::unimplemented;
+
+            CHECK(attr_.set_default_formats(dst_md(0)));
+
+            return status::success;
         }
 
         status_t init_conf();
@@ -89,8 +95,6 @@ struct gen9_convolution_fwd_t : public gpu_primitive_t {
 
         conv_conf_t conf;
     };
-
-    gen9_convolution_fwd_t(const pd_t *apd) : gpu_primitive_t(apd) {}
 
     status_t init(engine_t *engine) override {
         const char *kernel_name = nullptr;
@@ -130,6 +134,7 @@ private:
 };
 
 struct gen9_convolution_bwd_data_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_convolution_bwd_data_pd_t {
         pd_t(const convolution_desc_t *adesc, const primitive_attr_t *attr,
                 const convolution_fwd_pd_t *hint_fwd_pd)
@@ -179,8 +184,6 @@ struct gen9_convolution_bwd_data_t : public gpu_primitive_t {
         conv_conf_t conf;
     };
 
-    gen9_convolution_bwd_data_t(const pd_t *apd) : gpu_primitive_t(apd) {}
-
     status_t init(engine_t *engine) override {
         const char *kernel_name = nullptr;
         if (pd()->conf.is_depthwise) {
@@ -213,16 +216,13 @@ private:
 };
 
 struct gen9_convolution_bwd_weights_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_convolution_bwd_weights_pd_t {
         pd_t(const convolution_desc_t *adesc, const primitive_attr_t *attr,
                 const convolution_fwd_pd_t *hint_fwd_pd)
             : gpu_convolution_bwd_weights_pd_t(adesc, attr, hint_fwd_pd) {}
 
-        pd_t(const pd_t &rhs)
-            : gpu_convolution_bwd_weights_pd_t(rhs), conf(rhs.conf) {
-            if (rhs.rpd_wei_) rpd_wei_.reset(rhs.rpd_wei_->clone());
-            if (rhs.rpd_bia_) rpd_bia_.reset(rhs.rpd_bia_->clone());
-        }
+        pd_t(const pd_t &rhs) = default;
 
         DECLARE_COMMON_PD_T("ocl:ncsp:any", gen9_convolution_bwd_weights_t);
 
@@ -266,14 +266,12 @@ struct gen9_convolution_bwd_weights_t : public gpu_primitive_t {
         status_t init_kernel_ctx(compute::kernel_ctx_t &kernel_ctx) const;
 
         conv_conf_t conf;
-        std::unique_ptr<primitive_desc_t> rpd_wei_;
-        std::unique_ptr<primitive_desc_t> rpd_bia_;
+        std::shared_ptr<primitive_desc_t> rpd_wei_;
+        std::shared_ptr<primitive_desc_t> rpd_bia_;
 
     private:
         status_t init_scratchpad();
     };
-
-    gen9_convolution_bwd_weights_t(const pd_t *apd) : gpu_primitive_t(apd) {}
 
     status_t init(engine_t *engine) override {
         const char *kernel_name;

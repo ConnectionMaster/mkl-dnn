@@ -45,7 +45,6 @@ struct brgemm_1x1_convolution_fwd_t : public primitive_t {
         pd_t(const convolution_desc_t *adesc, const primitive_attr_t *attr,
                 const typename pd_t::base_class *hint_fwd_pd)
             : cpu_convolution_fwd_pd_t(adesc, attr, hint_fwd_pd)
-            , attr_(attr)
             , with_sum(false)
             , sum_scale(0) {}
 
@@ -54,7 +53,6 @@ struct brgemm_1x1_convolution_fwd_t : public primitive_t {
 
         status_t init(engine_t *engine);
 
-        const primitive_attr_t *attr_;
         brgemm_t brgs_[16];
         bool with_sum;
         float sum_scale;
@@ -83,7 +81,23 @@ protected:
     status_t init(engine_t *engine) override;
 
 private:
-    void exec_ker(const exec_ctx_t &ctx, int ithr,
+    //  brgemm convolution execution context
+    struct brgemm_exec_ctx_t {
+        brgemm_exec_ctx_t(const exec_ctx_t &ctx, const pd_t *pd)
+            : src(CTX_IN_MEM(const src_data_t *, DNNL_ARG_SRC))
+            , weights(CTX_IN_MEM(const wei_data_t *, DNNL_ARG_WEIGHTS))
+            , bias(CTX_IN_MEM(const char *, DNNL_ARG_BIAS))
+            , dst(CTX_OUT_MEM(dst_data_t *, DNNL_ARG_DST))
+            , post_ops_binary_rhs_arg_vec(binary_injector::prepare_binary_args(
+                      pd->attr()->post_ops_, ctx)) {}
+        const src_data_t *const __restrict src;
+        const wei_data_t *const __restrict weights;
+        const char *const __restrict bias;
+        dst_data_t *const __restrict dst;
+        const std::vector<const void *> post_ops_binary_rhs_arg_vec;
+    };
+
+    void exec_ker(const brgemm_exec_ctx_t &brgemm_ctx, int ithr,
             brgemm_batch_element_t *const __restrict brg_batch,
             char *const c_buffer, int g, int n, int ocb, int od, int oh, int ow,
             int icc) const;
@@ -111,7 +125,6 @@ private:
     size_t bia_dsz, acc_dsz, src_dsz, wei_dsz;
     bool need_postwork;
     int ic_chunks;
-    bool is_os_blocking;
     // const variables used for address calculations
     dim_t src_w_sz, src_h_sz, src_d_sz, dst_w_sz, dst_h_sz, dst_d_sz, wei_oc_sz,
             wei_ic_sz, wei_ocb_sz;

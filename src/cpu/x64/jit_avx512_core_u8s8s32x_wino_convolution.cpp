@@ -71,20 +71,20 @@ struct jit_avx512_core_u8s8s32x_wino_conv_src_trans_t : public jit_generator {
         : jcp(ajcp), attr_(attr), unsign_val_in_wino_domain(5) {}
     void generate() override;
 
-    int reg_inp_ind(int i) {
+    int reg_inp_ind(int i) const {
         assert(i < jcp.alpha * jcp.alpha);
         return (31 - i);
     }
 
-    Xmm vreg_inp(int i) { return Xmm(reg_inp_ind(i)); }
+    Xmm vreg_inp(int i) const { return Xmm(reg_inp_ind(i)); }
 
-    Zmm zmm_inp(int i) { return Zmm(reg_inp_ind(i)); }
+    Zmm zmm_inp(int i) const { return Zmm(reg_inp_ind(i)); }
 
-    Xmm vreg_tmp(int i) {
+    Xmm vreg_tmp(int i) const {
         assert(i < jcp.alpha * jcp.alpha);
         return Xmm(15 - i);
     }
-    Xmm vreg_out(int i) {
+    Xmm vreg_out(int i) const {
         assert(i < jcp.alpha * jcp.alpha);
         return Xmm(31 - i);
     }
@@ -269,26 +269,26 @@ struct jit_avx512_core_u8s8s32x_wino_conv_dst_trans_t : public jit_generator {
     void generate() override;
     bool maybe_relu(int position);
 
-    Zmm vreg_inp(int i) { // 16
+    Zmm vreg_inp(int i) const { // 16
         assert(i < jcp.alpha * jcp.alpha);
         return Zmm(31 - i);
     }
-    Zmm vreg_stg(int id) { // 8
+    Zmm vreg_stg(int id) const { // 8
         const int id_reg_stg = jcp.alpha * jcp.alpha + id;
         assert(id < 8);
         return Zmm(31 - id_reg_stg);
     }
-    Zmm vreg_out(int id) { // 4
+    Zmm vreg_out(int id) const { // 4
         const int id_reg_out = jcp.alpha * jcp.alpha + 8 + id;
         assert(id < 4);
         return Zmm(31 - id_reg_out);
     }
-    Xmm xmm_out(int id) { // 4
+    Xmm xmm_out(int id) const { // 4
         const int id_reg_out = jcp.alpha * jcp.alpha + 8 + id;
         assert(id < 4);
         return Xmm(31 - id_reg_out);
     }
-    Zmm vreg_tmp(int id) { // 2
+    Zmm vreg_tmp(int id) const { // 2
         const int id_reg_tmp = jcp.alpha * jcp.alpha + 12 + id;
         assert(id < 2);
         return Zmm(31 - id_reg_tmp);
@@ -300,6 +300,7 @@ struct jit_avx512_core_u8s8s32x_wino_conv_dst_trans_t : public jit_generator {
     Zmm zmm_bias_alpha = Zmm(2);
     Xmm xmm_bias_alpha = Xmm(2);
     Zmm vreg_saturation_ubound = Zmm(3);
+    Zmm vreg_sum_zp = Zmm(4);
 
     Opmask y_mask = Opmask(1);
     Opmask r_mask = Opmask(2);
@@ -324,6 +325,7 @@ struct jit_avx512_core_u8s8s32x_wino_conv_dst_trans_t : public jit_generator {
     Reg64 reg_ptr_bias = rbx;
     Reg64 reg_ptr_scales = abi_not_param1;
     Reg64 reg_ptr_sum_scale = rdx;
+    Reg64 reg_ptr_sum_zp = rdx;
     Reg64 reg_ptr_saturation_ubound = rax;
 };
 
@@ -356,9 +358,16 @@ void jit_avx512_core_u8s8s32x_wino_conv_dst_trans_t::generate() {
         const int sum_idx = p.find(primitive_kind::sum);
         const float *p_sum_scale
                 = (sum_idx != -1) ? &p.entry_[sum_idx].sum.scale : nullptr;
-        if (p_sum_scale && *p_sum_scale != 1.f)
-            mov(reg_ptr_sum_scale, (size_t)p_sum_scale);
-
+        const int32_t *p_sum_zp
+                = (sum_idx != -1) ? &p.entry_[sum_idx].sum.zero_point : nullptr;
+        if (p_sum_scale) {
+            if (*p_sum_zp != 0) {
+                mov(reg_ptr_sum_zp, reinterpret_cast<size_t>(p_sum_zp));
+                vcvtdq2ps(vreg_sum_zp, ptr_b[reg_ptr_sum_zp]);
+            }
+            if (*p_sum_scale != 1.f)
+                mov(reg_ptr_sum_scale, reinterpret_cast<size_t>(p_sum_scale));
+        }
         for (int i = 0; i < 16; i++) {
             int internal_offset = sizeof(int32_t) * jcp.out_stride * i;
             vmovups(vreg_inp(i),
@@ -430,6 +439,7 @@ void jit_avx512_core_u8s8s32x_wino_conv_dst_trans_t::generate() {
                     }
                     if (jcp.dst_dt != data_type::f32)
                         vcvtdq2ps(vreg_prev_dst, vreg_prev_dst);
+                    if (*p_sum_zp != 0) vsubps(vreg_prev_dst, vreg_sum_zp);
                     if (*p_sum_scale == 1.f)
                         vaddps(zmm, vreg_prev_dst);
                     else
@@ -528,12 +538,12 @@ struct jit_avx512_core_u8s8s32x_wino_conv_fwd_ker_t : public jit_generator {
             memory_desc_t &weights_md, memory_desc_t &dst_md,
             memory_desc_t &bias_md, const primitive_attr_t &attr);
 
-    Zmm vreg_out(int n, int m) {
+    Zmm vreg_out(int n, int m) const {
         const int id_reg_out = n * jcp.m_block + m;
         assert(id_reg_out < jcp.n2_block * jcp.m_block);
         return Zmm(31 - id_reg_out);
     }
-    Zmm vreg_wei(int i) {
+    Zmm vreg_wei(int i) const {
         assert(31 - jcp.n2_block * jcp.m_block - i
                 > (jcp.ver == ver_vnni ? 0 : 2));
         return Zmm(31 - jcp.n2_block * jcp.m_block - i);
@@ -1089,7 +1099,8 @@ void jit_avx512_core_u8s8s32x_wino_convolution_fwd_t<
 
     parallel_nd_ext(jcp.nthr, jcp.mb, div_up(jcp.oh, jcp.yb),
             div_up(jcp.ow, jcp.xb),
-            [&](int ithr, int nthr, int mb, int tile_y_b, int tile_x_b) {
+            [&](dim_t ithr, dim_t nthr, dim_t mb, dim_t tile_y_b,
+                    dim_t tile_x_b) {
                 assert(nthr <= jcp.nthr);
                 MAYBE_UNUSED(nthr);
 
@@ -1214,7 +1225,7 @@ void jit_avx512_core_u8s8s32x_wino_convolution_fwd_t<
     for (int tile_x = 0; tile_x < jcp.ow; tile_x += jcp.xb) {
         /* transformation of input tensor to winograd domain */
         parallel_nd(div_up(jcp.yb, 2), div_up(jcp.xb, 2), jcp.mb_block,
-                [&](int y_in_block_b, int x_in_block_b, int mb) {
+                [&](dim_t y_in_block_b, dim_t x_in_block_b, dim_t mb) {
                     int y_in_block = y_in_block_b * 2;
                     int x_in_block = x_in_block_b * 2;
 
@@ -1260,7 +1271,7 @@ void jit_avx512_core_u8s8s32x_wino_convolution_fwd_t<
                 });
 
         /* gemms */
-        parallel_nd(16, jcp.n_chunks, [&](int tile_ij, int nnb) {
+        parallel_nd(16, jcp.n_chunks, [&](dim_t tile_ij, dim_t nnb) {
             auto gemm_p = jit_avx512_core_u8s8s32x_wino_conv_fwd_ker_t::
                     call_params_t();
 
@@ -1277,7 +1288,7 @@ void jit_avx512_core_u8s8s32x_wino_convolution_fwd_t<
 
         /* transformation from winograd domain to output tensor */
         parallel_nd(div_up(jcp.yb, 2), div_up(jcp.xb, 2), jcp.mb_block,
-                [&](int y_in_block_b, int x_in_block_b, int mb) {
+                [&](dim_t y_in_block_b, dim_t x_in_block_b, dim_t mb) {
                     int y_in_block = y_in_block_b * 2;
                     int x_in_block = x_in_block_b * 2;
 

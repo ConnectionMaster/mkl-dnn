@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -33,13 +33,10 @@ namespace impl {
 // Memory storage is engine-specific and has different implementations for
 // different engines.
 struct memory_storage_t : public c_compatible {
-    memory_storage_t(engine_t *engine)
-        : engine_(engine), parent_storage_(this) {}
+    memory_storage_t(engine_t *engine, const memory_storage_t *parent_storage);
+    memory_storage_t(engine_t *engine) : memory_storage_t(engine, this) {}
 
-    memory_storage_t(engine_t *engine, const memory_storage_t *parent_storage)
-        : engine_(engine), parent_storage_(parent_storage) {}
-
-    virtual ~memory_storage_t() = default;
+    virtual ~memory_storage_t();
 
     status_t init(unsigned flags, size_t size, void *handle);
 
@@ -62,9 +59,9 @@ struct memory_storage_t : public c_compatible {
     virtual size_t base_offset() const { return 0; }
 
     virtual status_t map_data(
-            void **mapped_ptr, stream_t *stream, size_t size) const;
+            void **mapped_ptr, stream_t *stream, size_t size) const = 0;
 
-    virtual status_t unmap_data(void *mapped_ptr, stream_t *stream) const;
+    virtual status_t unmap_data(void *mapped_ptr, stream_t *stream) const = 0;
 
     virtual bool is_host_accessible() const { return false; }
 
@@ -116,6 +113,20 @@ struct empty_memory_storage_t : public memory_storage_t {
     status_t set_data_handle(void *handle) override {
         assert(!"not expected");
         return status::runtime_error;
+    }
+
+    status_t map_data(
+            void **mapped_ptr, stream_t *stream, size_t size) const override {
+        UNUSED(mapped_ptr);
+        UNUSED(stream);
+        UNUSED(size);
+        return status::success;
+    }
+
+    status_t unmap_data(void *mapped_ptr, stream_t *stream) const override {
+        UNUSED(mapped_ptr);
+        UNUSED(stream);
+        return status::success;
     }
 
     std::unique_ptr<memory_storage_t> get_sub_storage(

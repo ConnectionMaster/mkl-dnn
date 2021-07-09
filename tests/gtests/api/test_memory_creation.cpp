@@ -70,10 +70,12 @@ protected:
         {
             // Put non-zeros even to the padded area
             auto mem0_ptr = map_memory<data_t>(mem0);
+            if (phys_size) GTEST_EXPECT_NE(mem0_ptr, nullptr);
             fill_data<data_t>(phys_size, mem0_ptr);
 
             // mem1_placeholder = copy(mem0)
             auto mem1_ph_ptr = map_memory<data_t>(mem1_placeholder);
+            if (phys_size) GTEST_EXPECT_NE(mem1_ph_ptr, nullptr);
             for (dnnl::memory::dim i = 0; i < phys_size; ++i)
                 mem1_ph_ptr[i] = mem0_ptr[i];
         }
@@ -84,7 +86,9 @@ protected:
         // Map-unmap section
         {
             auto mem0_ptr = map_memory<data_t>(mem0);
+            if (phys_size) GTEST_EXPECT_NE(mem0_ptr, nullptr);
             auto mem1_ptr = map_memory<data_t>(mem1);
+            if (phys_size) GTEST_EXPECT_NE(mem1_ptr, nullptr);
 
             // Check if mem0 == mem1
             for (dnnl::memory::dim i = 0; i < phys_size; ++i)
@@ -187,8 +191,8 @@ class c_api_memory_test_t : public ::testing::Test {
 };
 
 TEST_F(c_api_memory_test_t, TestZeroPadBoom) {
-#ifdef DNNL_WITH_SYCL
-    SKIP_IF(true, "Test does not support SYCL.");
+#if defined(DNNL_WITH_SYCL) || DNNL_CPU_RUNTIME == DNNL_RUNTIME_NONE
+    SKIP_IF(true, "Test does not support SYCL and GPU only.");
 #endif
 
     dnnl_memory_desc_t md;
@@ -230,7 +234,8 @@ TEST_F(c_api_memory_test_t, TestZeroPadBoom) {
     ASSERT_TRUE(dnnl_success == dnnl_engine_destroy(e));
 }
 
-#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_DPCPP
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_DPCPP \
+        && DNNL_CPU_RUNTIME != DNNL_RUNTIME_NONE
 TEST(memory_test_cpp, TestSetDataHandleCPU) {
     engine eng = engine(engine::kind::cpu, 0);
     stream str = make_stream(eng);

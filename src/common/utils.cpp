@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2018-2020 Intel Corporation
+* Copyright 2018-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -19,11 +19,11 @@
 #include <windows.h>
 #endif
 
-#if defined __linux__ || defined __APPLE__ || defined __FreeBSD__
+#if defined __unix__ || defined __APPLE__ || defined __FreeBSD__
 #include <unistd.h>
 #endif
 
-#ifdef __linux__
+#ifdef __unix__
 #include <sys/stat.h>
 #include <sys/types.h>
 #endif
@@ -40,7 +40,9 @@
 #include "memory_debug.hpp"
 #include "utils.hpp"
 
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_NONE
 #include "cpu/platform.hpp"
+#endif
 
 namespace dnnl {
 namespace impl {
@@ -152,13 +154,22 @@ bool get_jit_dump() {
     return jit_dump.get();
 }
 
+#if DNNL_AARCH64
+static setting_t<unsigned> jit_profiling_flags {DNNL_JIT_PROFILE_LINUX_PERFMAP};
+#else
 static setting_t<unsigned> jit_profiling_flags {DNNL_JIT_PROFILE_VTUNE};
+#endif
 unsigned get_jit_profiling_flags() {
+    MAYBE_UNUSED(jit_profiling_flags);
+    unsigned flag = 0;
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_NONE
     if (!jit_profiling_flags.initialized()) {
         jit_profiling_flags.set(
                 getenv_int("DNNL_JIT_PROFILE", jit_profiling_flags.get()));
     }
-    return jit_profiling_flags.get();
+    flag = jit_profiling_flags.get();
+#endif
+    return flag;
 }
 
 static setting_t<std::string> jit_profiling_jitdumpdir;
@@ -189,9 +200,13 @@ dnnl_status_t init_jit_profiling_jitdumpdir(
 }
 
 std::string get_jit_profiling_jitdumpdir() {
+    std::string jitdumpdir;
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_NONE
     if (!jit_profiling_jitdumpdir.initialized())
         init_jit_profiling_jitdumpdir(nullptr, false);
-    return jit_profiling_jitdumpdir.get();
+    jitdumpdir = jit_profiling_jitdumpdir.get();
+#endif
+    return jitdumpdir;
 }
 
 } // namespace impl
@@ -205,6 +220,7 @@ dnnl_status_t dnnl_set_jit_dump(int enabled) {
 
 dnnl_status_t dnnl_set_jit_profiling_flags(unsigned flags) {
     using namespace dnnl::impl;
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_NONE
     unsigned mask = DNNL_JIT_PROFILE_VTUNE;
 #ifdef __linux__
     mask |= DNNL_JIT_PROFILE_LINUX_PERF;
@@ -213,26 +229,49 @@ dnnl_status_t dnnl_set_jit_profiling_flags(unsigned flags) {
     if (flags & ~mask) return status::invalid_arguments;
     jit_profiling_flags.set(flags);
     return status::success;
+#else
+    return status::unimplemented;
+#endif
 }
 
 dnnl_status_t dnnl_set_jit_profiling_jitdumpdir(const char *dir) {
-    return dnnl::impl::init_jit_profiling_jitdumpdir(dir, true);
+    auto status = dnnl::impl::status::unimplemented;
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_NONE
+    status = dnnl::impl::init_jit_profiling_jitdumpdir(dir, true);
+#endif
+    return status;
 }
 
 dnnl_status_t dnnl_set_max_cpu_isa(dnnl_cpu_isa_t isa) {
-    return dnnl::impl::cpu::platform::set_max_cpu_isa(isa);
+    auto status = dnnl::impl::status::runtime_error;
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_NONE
+    status = dnnl::impl::cpu::platform::set_max_cpu_isa(isa);
+#endif
+    return status;
 }
 
 dnnl_cpu_isa_t dnnl_get_effective_cpu_isa() {
-    return dnnl::impl::cpu::platform::get_effective_cpu_isa();
+    auto isa = dnnl_cpu_isa_all;
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_NONE
+    isa = dnnl::impl::cpu::platform::get_effective_cpu_isa();
+#endif
+    return isa;
 }
 
 dnnl_status_t dnnl_set_cpu_isa_hints(dnnl_cpu_isa_hints_t isa_hints) {
-    return dnnl::impl::cpu::platform::set_cpu_isa_hints(isa_hints);
+    auto status = dnnl::impl::status::runtime_error;
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_NONE
+    status = dnnl::impl::cpu::platform::set_cpu_isa_hints(isa_hints);
+#endif
+    return status;
 }
 
 dnnl_cpu_isa_hints_t dnnl_get_cpu_isa_hints() {
-    return dnnl::impl::cpu::platform::get_cpu_isa_hints();
+    auto isa_hint = dnnl_cpu_isa_no_hints;
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_NONE
+    isa_hint = dnnl::impl::cpu::platform::get_cpu_isa_hints();
+#endif
+    return isa_hint;
 }
 
 #if DNNL_CPU_THREADING_RUNTIME == DNNL_RUNTIME_THREADPOOL

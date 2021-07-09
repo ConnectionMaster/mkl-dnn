@@ -24,6 +24,7 @@
 #include <CL/sycl.hpp>
 
 #include "common/stream.hpp"
+#include "common/thread_local_storage.hpp"
 #include "gpu/nvidia/sycl_cuda_utils.hpp"
 #include "sycl/sycl_device_info.hpp"
 #include "sycl/sycl_engine_base.hpp"
@@ -35,13 +36,10 @@ namespace nvidia {
 
 class cuda_gpu_engine_impl_list_t {
 public:
-    static const dnnl::impl::engine_t::reorder_primitive_desc_create_f *
-    get_reorder_implementation_list(
+    static const impl_list_item_t *get_reorder_implementation_list(
             const memory_desc_t *src_md, const memory_desc_t *dst_md);
-    static const dnnl::impl::engine_t::concat_primitive_desc_create_f *
-    get_concat_implementation_list();
-    static const dnnl::impl::engine_t::sum_primitive_desc_create_f *
-    get_sum_implementation_list();
+    static const dnnl::impl::impl_list_item_t *get_concat_implementation_list();
+    static const dnnl::impl::impl_list_item_t *get_sum_implementation_list();
 };
 
 class sycl_cuda_engine_t : public dnnl::impl::sycl::sycl_engine_base_t {
@@ -56,30 +54,38 @@ public:
     status_t create_stream(stream_t **stream, unsigned flags) override;
     status_t create_stream(stream_t **stream, cl::sycl::queue &queue);
 
-    const dnnl::impl::engine_t::reorder_primitive_desc_create_f *
-    get_reorder_implementation_list(const memory_desc_t *src_md,
+    const dnnl::impl::impl_list_item_t *get_reorder_implementation_list(
+            const memory_desc_t *src_md,
             const memory_desc_t *dst_md) const override {
         return cuda_gpu_engine_impl_list_t::get_reorder_implementation_list(
                 src_md, dst_md);
     }
 
-    const dnnl::impl::engine_t::concat_primitive_desc_create_f *
+    const dnnl::impl::impl_list_item_t *
     get_concat_implementation_list() const override {
         return cuda_gpu_engine_impl_list_t::get_concat_implementation_list();
     }
 
-    const dnnl::impl::engine_t::sum_primitive_desc_create_f *
+    const dnnl::impl::impl_list_item_t *
     get_sum_implementation_list() const override {
         return cuda_gpu_engine_impl_list_t::get_sum_implementation_list();
     }
 
-    const primitive_desc_create_f *get_implementation_list(
+    void activate_stream_cudnn(stream_t *stream);
+    void activate_stream_cublas(stream_t *stream);
+
+    const impl_list_item_t *get_implementation_list(
             const op_desc_t *) const override;
     CUcontext get_underlying_context() const;
-    cudnnHandle_t *get_cudnn_handle() const { return cudnn_handle_.get(); }
-    cublasHandle_t *get_cublas_handle() const { return cublas_handle_.get(); }
+    cudnnHandle_t *get_cudnn_handle();
+    cublasHandle_t *get_cublas_handle();
     const bool has_primary_context() const { return primary_context_; }
     device_id_t device_id() const override;
+
+#ifdef DNNL_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
+protected:
+    ~sycl_cuda_engine_t() override = default;
+#endif
 
 private:
     // This functions sets the context type. Since cuda requires different
@@ -96,20 +102,13 @@ private:
     // multi-threading programming If all the streams belongs to one thread, the
     // same handle will be used for all. Creation of handle is expensive and
     // must be avoided when it is not necessary.
-    std::unique_ptr<cudnnHandle_t, std::function<void(cudnnHandle_t *)>>
-            cudnn_handle_ {nullptr, [](cudnnHandle_t *h) {
-                               if (h != nullptr) {
-                                   CUDNN_EXECUTE_FUNC_V(cudnnDestroy, *h);
-                                   h = nullptr;
-                               }
-                           }};
-    std::unique_ptr<cublasHandle_t, std::function<void(cublasHandle_t *)>>
-            cublas_handle_ {nullptr, [](cublasHandle_t *h) {
-                                if (h != nullptr) {
-                                    CUBLAS_EXECUTE_FUNC_V(cublasDestroy, *h);
-                                    h = nullptr;
-                                }
-                            }};
+    utils::thread_local_storage_t<
+            std::unique_ptr<cudnnHandle_t, void (*)(cudnnHandle_t *)>>
+            cudnn_handle_;
+    utils::thread_local_storage_t<
+            std::unique_ptr<cublasHandle_t, void (*)(cublasHandle_t *)>>
+            cublas_handle_;
+
     bool primary_context_;
 };
 

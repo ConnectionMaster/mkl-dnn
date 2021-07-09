@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2018-2020 Intel Corporation
+* Copyright 2018-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -153,12 +153,11 @@ static int init_pd(dnnl_engine_t engine, const prb_t *prb,
     attr_args_t attr_args;
     attr_args.prepare_output_scales(prb->attr, prb->scales, prb->oc);
     attr_args.prepare_binary_post_op_mds(prb->attr, prb->ndims, dst_dims);
-    auto dnnl_attr = create_dnnl_attr(prb->attr, attr_args);
+    auto dnnl_attr = make_benchdnn_dnnl_wrapper(
+            create_dnnl_attr(prb->attr, attr_args));
 
     dnnl_status_t init_status
             = dnnl_primitive_desc_create(&dpd, &cd, dnnl_attr, engine, nullptr);
-
-    dnnl_primitive_attr_destroy(dnnl_attr);
 
     if (init_status == dnnl_unimplemented) {
         return res->state = UNIMPLEMENTED, OK;
@@ -169,12 +168,13 @@ static int init_pd(dnnl_engine_t engine, const prb_t *prb,
     if (maybe_skip(res->impl_name)) {
         BENCHDNN_PRINT(2, "SKIPPED: oneDNN implementation: %s\n",
                 res->impl_name.c_str());
-        DNN_SAFE(dnnl_primitive_desc_destroy(dpd), WARN);
         return res->state = SKIPPED, res->reason = SKIP_IMPL_HIT, OK;
     } else {
         BENCHDNN_PRINT(
                 5, "oneDNN implementation: %s\n", res->impl_name.c_str());
     }
+
+    SAFE(check_pd_w_and_wo_attr(res, prb->attr, cd), WARN);
 
     return OK;
 }
@@ -231,11 +231,11 @@ void check_known_skipped_case(const prb_t *prb, res_t *res) {
 
         // FIXME: there's a bug in the library resulting in
         // memory_tracking.hpp:458: Assertion `registry_.size() == 0' failed.
-        // Specifically for 3D spatial case, when both BWD_W and BWD_WB are
-        // run. It must be cache interaction, but not clear which side is
+        // For any spatial case, when both BWD_W and BWD_WB are run.
+        // It must be cache interaction, but not clear which side is
         // guilty. Likely Nvidia implementation. Switch it off until further
         // investigation.
-        if (prb->ndims == 5 && prb->dir == BWD_WB) {
+        if (prb->dir == BWD_WB) {
             res->state = SKIPPED, res->reason = CASE_NOT_SUPPORTED;
             return;
         }
@@ -246,6 +246,7 @@ int doit(const prb_t *prb, res_t *res) {
     if (bench_mode == LIST) return res->state = LISTED, OK;
 
     check_known_skipped_case(prb, res);
+    check_sum_post_ops(prb->attr, res);
     if (res->state == SKIPPED) return OK;
 
     prb_t p_tr((desc_t)*prb, prb->dir, prb->cfg, prb->stag, prb->wtag,
@@ -255,15 +256,14 @@ int doit(const prb_t *prb, res_t *res) {
     swap(p_tr.id, p_tr.od);
     swap(p_tr.iw, p_tr.ow);
 
-    dnnl_primitive_t d {};
-    SAFE(init_prim(&d, init_pd, prb, res), WARN);
+    benchdnn_dnnl_wrapper_t<dnnl_primitive_t> prim;
+    SAFE(init_prim(prim, init_pd, prb, res), WARN);
     if (res->state == SKIPPED || res->state == UNIMPLEMENTED) return OK;
 
     const_dnnl_primitive_desc_t const_pd;
-    DNN_SAFE(dnnl_primitive_get_primitive_desc(d, &const_pd), CRIT);
+    DNN_SAFE(dnnl_primitive_get_primitive_desc(prim, &const_pd), CRIT);
 
     if (check_mem_size(const_pd) != OK) {
-        DNN_SAFE_V(dnnl_primitive_destroy(d));
         return res->state = SKIPPED, res->reason = NOT_ENOUGH_RAM, OK;
     }
 
@@ -308,27 +308,38 @@ int doit(const prb_t *prb, res_t *res) {
     dnn_mem_t dst_fp(dst_md, fp, src_tag, test_engine);
     dnn_mem_t wei_tr_fp(wei_tr_md, fp, wei_tag, test_engine);
     dnn_mem_t bia_fp(bia_md, fp, tag::x, test_engine);
+    dnn_mem_t src_zero_points_m;
+    dnn_mem_t dst_zero_points_m;
 
     /* fill memory + reorders <-> */
-    SAFE(fill_dst(prb, dst_dt, dst_fp, res), WARN);
-    SAFE(fill_wei(prb, wei_dt, wei_fp, res), WARN);
-    SAFE(fill_src(prb, src_dt, src_fp, res), WARN);
-    SAFE(transpose_data_wei(prb, wei_fp, wei_tr_fp), WARN);
-    SAFE(fill_bia(prb, bia_dt, bia_fp, res), WARN);
+    if (need_dst_init(prb)) SAFE(fill_dst(prb, dst_dt, dst_fp, res), WARN);
+    if (need_src_init(prb)) SAFE(fill_src(prb, src_dt, src_fp, res), WARN);
+    if (need_wei_init(prb)) {
+        SAFE(fill_wei(prb, wei_dt, wei_fp, res), WARN);
+        SAFE(transpose_data_wei(prb, wei_fp, wei_tr_fp), WARN);
+    }
+    if (need_bia_init(prb)) SAFE(fill_bia(prb, bia_dt, bia_fp, res), WARN);
 
     args_t args;
 
     if (prb->dir & FLAG_FWD) {
+        maybe_prepare_runtime_zero_points(src_zero_points_m, prb->attr,
+                DNNL_ARG_SRC, prb->ic, prb->src_zp);
+        maybe_prepare_runtime_zero_points(dst_zero_points_m, prb->attr,
+                DNNL_ARG_DST, prb->oc, prb->dst_zp);
+
         args.set(DNNL_ARG_SRC, src_dt);
         args.set(DNNL_ARG_WEIGHTS, wei_dt);
         args.set(DNNL_ARG_BIAS, bia_dt);
         args.set(DNNL_ARG_DST, dst_dt);
         args.set(DNNL_ARG_SCRATCHPAD, scratchpad_dt);
         args.set(binary_po_args, binary_po_dt);
+        args.set(DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_SRC, src_zero_points_m);
+        args.set(DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_DST, dst_zero_points_m);
 
-        SAFE(execute_and_wait(d, args), WARN);
+        SAFE(execute_and_wait(prim, args), WARN);
 
-        if (bench_mode & CORR) {
+        if (is_bench_mode(CORR)) {
             compute_ref_bwd_d(&p_tr, nullptr, dst_fp, wei_tr_fp, bia_fp,
                     binary_po_fp, src_fp);
             dnn_mem_t dst(dst_dt, fp, src_tag, test_engine);
@@ -340,9 +351,9 @@ int doit(const prb_t *prb, res_t *res) {
         args.set(DNNL_ARG_DIFF_SRC, src_dt);
         args.set(DNNL_ARG_SCRATCHPAD, scratchpad_dt);
 
-        SAFE(execute_and_wait(d, args), WARN);
+        SAFE(execute_and_wait(prim, args), WARN);
 
-        if (bench_mode & CORR) {
+        if (is_bench_mode(CORR)) {
             dnn_mem_t zero_fp;
             compute_ref_fwd(&p_tr, nullptr, dst_fp, wei_tr_fp, zero_fp,
                     std::vector<dnn_mem_t>(), src_fp);
@@ -356,9 +367,9 @@ int doit(const prb_t *prb, res_t *res) {
         args.set(DNNL_ARG_DIFF_BIAS, bia_dt);
         args.set(DNNL_ARG_SCRATCHPAD, scratchpad_dt);
 
-        SAFE(execute_and_wait(d, args), WARN);
+        SAFE(execute_and_wait(prim, args), WARN);
 
-        if (bench_mode & CORR) {
+        if (is_bench_mode(CORR)) {
             compute_ref_bwd_weights(&p_tr, dst_fp, wei_tr_fp, src_fp);
             transpose_data_wei(&p_tr, wei_tr_fp, wei_fp);
             dnn_mem_t wei(wei_dt, fp, wei_tag, test_engine);
@@ -373,11 +384,7 @@ int doit(const prb_t *prb, res_t *res) {
         SAFE(FAIL, CRIT);
     }
 
-    measure_perf(res->timer, d, args);
-
-    DNN_SAFE_V(dnnl_primitive_destroy(d));
-
-    return OK;
+    return measure_perf(res->timer, prim, args);
 }
 
 } // namespace deconv

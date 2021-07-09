@@ -1,5 +1,6 @@
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2021 Intel Corporation
+* Copyright 2020-2021 FUJITSU LIMITED
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -305,17 +306,21 @@ HANDLE_EXCEPTIONS_FOR_TEST_F(attr_test_t, TestPostOps) {
 
     algorithm alg;
     float scale, alpha, beta;
+    int32_t sum_zp;
+    data_type dt;
 
     ASSERT_EQ(ops.len(), 0);
     ASSERT_EQ(attr.get_post_ops().len(), 0);
 
-    ops.append_sum(1.1f);
+    ops.append_sum(1.1f, 1, data_type::f32);
     attr.set_post_ops(ops);
 
     ASSERT_EQ(attr.get_post_ops().len(), 1);
     ASSERT_EQ(attr.get_post_ops().kind(0), primitive::kind::sum);
-    attr.get_post_ops().get_params_sum(0, scale);
+    attr.get_post_ops().get_params_sum(0, scale, sum_zp, dt);
     ASSERT_FLOAT_EQ(scale, 1.1f);
+    ASSERT_EQ(1, sum_zp);
+    ASSERT_EQ(data_type::f32, dt);
 
     ops.append_eltwise(2.2f, algorithm::eltwise_bounded_relu, 3.3f, 4.4f);
     attr.set_post_ops(ops);
@@ -408,6 +413,9 @@ HANDLE_EXCEPTIONS_FOR_TEST_F(attr_test_t, DepthwiseFusion) {
     auto engine_kind = get_test_engine_kind();
     SKIP_IF(engine_kind != engine::kind::cpu,
             "Depthwise fusion is only supported on CPU engine");
+#if DNNL_AARCH64
+    SKIP_IF(true, "Depthwise fusion is not supported on AArch64 at this time");
+#endif
 
     engine e {engine_kind, 0};
 
@@ -455,6 +463,55 @@ HANDLE_EXCEPTIONS_FOR_TEST_F(attr_test_t, DepthwiseFusion) {
         if (!test_out_of_memory()) {
             ASSERT_EQ(impl_info_fused, impl_info_unfused);
         }
+    }
+}
+
+HANDLE_EXCEPTIONS_FOR_TEST_F(attr_test_t, InnerProdPostops) {
+    auto engine_kind = get_test_engine_kind();
+    SKIP_IF(!DNNL_X64 || engine_kind != engine::kind::cpu,
+            "Inner Product impl_info_str should be same only on x64 CPU");
+    engine e {engine_kind, 0};
+
+    std::vector<memory::data_type> test_dts {
+            memory::data_type::f32, memory::data_type::s8};
+
+    if (!unsupported_data_type(memory::data_type::bf16))
+        test_dts.push_back(memory::data_type::bf16);
+
+    for (auto dt : test_dts) {
+        memory::desc src_md {{1024, 512, 64, 64}, dt, memory::format_tag::any};
+        memory::desc wht_md {{256, 512, 64, 64}, dt, memory::format_tag::any};
+        memory::desc bia_md {{256}, dt, memory::format_tag::any};
+        memory::desc dst_md {{1024, 256}, dt, memory::format_tag::any};
+
+        auto ip_desc = inner_product_forward::desc(
+                prop_kind::forward_training, src_md, wht_md, bia_md, dst_md);
+
+        std::string impl_info_no_postops;
+
+        auto pd = inner_product_forward::primitive_desc(ip_desc, e);
+        ASSERT_NO_THROW(impl_info_no_postops = pd.impl_info_str(););
+
+        dnnl::primitive_attr attr;
+        const float scale = 1.f;
+        const float alpha = 1.f;
+        const float beta = 1.f;
+        dnnl::post_ops ops;
+
+        ops.append_sum(1.0);
+
+        ops.append_eltwise(scale, algorithm::eltwise_relu, alpha, beta);
+
+        memory::desc src1_md({1}, data_type::f32, {1});
+        ops.append_binary(algorithm::binary_add, src1_md);
+
+        attr.set_post_ops(ops);
+
+        std::string impl_info_with_postops;
+
+        pd = inner_product_forward::primitive_desc(ip_desc, attr, e);
+        ASSERT_NO_THROW(impl_info_with_postops = pd.impl_info_str(););
+        ASSERT_EQ(impl_info_no_postops, impl_info_with_postops);
     }
 }
 

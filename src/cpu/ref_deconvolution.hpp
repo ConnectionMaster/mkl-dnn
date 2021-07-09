@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2018-2020 Intel Corporation
+* Copyright 2018-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -112,7 +112,6 @@ struct ref_deconvolution_fwd_t : public primitive_t {
             // impl available and apply post-ops and/or bias update later in
             // this impl via simple loop.
             primitive_attr_t conv_attr;
-            conv_attr.set_scratchpad_mode(scratchpad_mode::user);
 
             convolution_desc_t cd;
             // When no attributes were requested, try to find a bwd_d conv impl
@@ -127,7 +126,7 @@ struct ref_deconvolution_fwd_t : public primitive_t {
                 if (!it.is_initialized()) return status::out_of_memory;
 
                 while (++it != it.end()) {
-                    conv_pd_.reset(it.fetch_once());
+                    conv_pd_ = *it;
                     if (with_bias()) {
                         conv_supports_bias_ = utils::downcast<
                                 cpu_convolution_bwd_data_pd_t *>(conv_pd_.get())
@@ -147,7 +146,7 @@ struct ref_deconvolution_fwd_t : public primitive_t {
             if (!it.is_initialized()) return status::out_of_memory;
 
             while (++it != it.end()) {
-                conv_pd_.reset(it.fetch_once());
+                conv_pd_ = *it;
                 bool ok = conv_pd_->weights_md()->extra.flags == 0;
                 if (ok) return status::success;
             }
@@ -158,13 +157,14 @@ struct ref_deconvolution_fwd_t : public primitive_t {
             using namespace format_tag;
             using smask_t = primitive_attr_t::skip_mask_t;
 
-            bool ok = is_fwd()
+            const bool ok = is_fwd()
                     && utils::one_of(desc()->alg_kind,
                             alg_kind::deconvolution_direct,
                             alg_kind::deconvolution_winograd)
-                    && attr()->has_default_values(
-                            smask_t::oscale | smask_t::post_ops)
-                    && output_scales_mask_ok() && post_ops_ok();
+                    && attr()->has_default_values(smask_t::oscale
+                            | smask_t::post_ops | smask_t::zero_points_runtime)
+                    && output_scales_mask_ok() && post_ops_ok()
+                    && zero_points_ok();
             if (!ok) return status::unimplemented;
 
             CHECK(init_convolution(engine));
@@ -190,10 +190,10 @@ struct ref_deconvolution_fwd_t : public primitive_t {
                     utils::pick(ndims() - 3, nCw16c, nChw16c, nCdhw16c));
 
             init_scratchpad();
-            return status::success;
+            return attr_.set_default_formats(dst_md(0));
         }
 
-        std::unique_ptr<primitive_desc_t> conv_pd_;
+        std::shared_ptr<primitive_desc_t> conv_pd_;
         bool conv_supports_bias_ = false;
         format_tag_t dst_tag_;
 
@@ -220,6 +220,10 @@ struct ref_deconvolution_fwd_t : public primitive_t {
             if (attr()->post_ops_.find(primitive_kind::sum) != -1)
                 scratchpad.book(key_deconv_sum, dst_d.nelems(true),
                         dst_d.data_type_size());
+
+            if (!attr()->zero_points_.has_default_values(DNNL_ARG_SRC)) {
+                scratchpad.book<int32_t>(key_deconv_zp, OC() * G());
+            }
         }
 
         bool output_scales_mask_ok() const {
@@ -232,6 +236,19 @@ struct ref_deconvolution_fwd_t : public primitive_t {
 
         bool post_ops_ok() const {
             return attr()->post_ops_.find(primitive_kind::convolution) == -1;
+        }
+
+        bool zero_points_ok() const {
+            using namespace data_type;
+            int mask_src = 0, mask_dst = 0;
+            attr()->zero_points_.get(DNNL_ARG_SRC, nullptr, &mask_src, nullptr);
+            attr()->zero_points_.get(DNNL_ARG_DST, nullptr, &mask_dst, nullptr);
+
+            return IMPLICATION(!utils::one_of(src_md()->data_type, s8, u8),
+                           attr()->zero_points_.has_default_values())
+                    && attr()->zero_points_.has_default_values(DNNL_ARG_WEIGHTS)
+                    && (mask_src == 0 || mask_src == 1 << 1)
+                    && (mask_dst == 0 || mask_dst == 1 << 1);
         }
     };
 
@@ -275,7 +292,7 @@ private:
             const float *conv_output) const;
 
     template <data_type_t dst_type>
-    void compute_ref_attrs(const exec_ctx_t &ctx, const float *conv_output,
+    status_t compute_ref_attrs(const exec_ctx_t &ctx, const float *conv_output,
             typename prec_traits<dst_type>::type *original_dst) const;
 
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
@@ -305,13 +322,12 @@ struct ref_deconvolution_bwd_data_t : public primitive_t {
             if (status != status::success) return status;
             primitive_attr_t conv_attr(*attr());
             if (!conv_attr.is_initialized()) return status::out_of_memory;
-            conv_attr.set_scratchpad_mode(scratchpad_mode::user);
 
             dnnl_primitive_desc_iterator it(
                     engine, (op_desc_t *)&cd, &conv_attr, nullptr);
             if (!it.is_initialized()) return status::out_of_memory;
             while (++it != it.end()) {
-                conv_pd_.reset(it.fetch_once());
+                conv_pd_ = *it;
                 if (conv_pd_->weights_md()->extra.flags == 0)
                     return status::success;
             }
@@ -350,7 +366,7 @@ struct ref_deconvolution_bwd_data_t : public primitive_t {
             return status::unimplemented;
         }
 
-        std::unique_ptr<primitive_desc_t> conv_pd_;
+        std::shared_ptr<primitive_desc_t> conv_pd_;
 
     private:
         void init_scratchpad() {
@@ -399,13 +415,12 @@ struct ref_deconvolution_bwd_weights_t : public primitive_t {
             if (status != status::success) return status;
             primitive_attr_t conv_attr(*attr());
             if (!conv_attr.is_initialized()) return status::out_of_memory;
-            conv_attr.set_scratchpad_mode(scratchpad_mode::user);
 
             dnnl_primitive_desc_iterator it(
                     engine, (op_desc_t *)&cd, &conv_attr, nullptr);
             if (!it.is_initialized()) return status::out_of_memory;
             while (++it != it.end()) {
-                conv_pd_.reset(it.fetch_once());
+                conv_pd_ = *it;
                 bool bf16_ref_deconv_supports_bias = IMPLICATION(with_bias()
                                 && desc()->src_desc.data_type
                                         == data_type::bf16,
@@ -462,7 +477,7 @@ struct ref_deconvolution_bwd_weights_t : public primitive_t {
             return status::unimplemented;
         }
 
-        std::unique_ptr<primitive_desc_t> conv_pd_;
+        std::shared_ptr<primitive_desc_t> conv_pd_;
         format_tag_t dst_tag_;
 
     private:

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2018-2020 Intel Corporation
+* Copyright 2018-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -20,7 +20,10 @@
 
 #include "c_types_map.hpp"
 #include "engine.hpp"
+#include "impl_list_item.hpp"
+#include "primitive_cache.hpp"
 #include "primitive_desc.hpp"
+#include "primitive_hashing.hpp"
 #include "type_helpers.hpp"
 #include "utils.hpp"
 
@@ -30,10 +33,14 @@ using namespace dnnl::impl;
 using namespace dnnl::impl::utils;
 using namespace dnnl::impl::status;
 
-status_t dnnl_sum_primitive_desc_create(primitive_desc_iface_t **sum_pd_iface,
+namespace dnnl {
+namespace impl {
+
+status_t sum_primitive_desc_create(primitive_desc_iface_t **sum_pd_iface,
         const memory_desc_t *dst_md, int n, const float *scales,
         const memory_desc_t *src_mds, const primitive_attr_t *attr,
         engine_t *engine) {
+
     bool args_ok = !any_null(sum_pd_iface, src_mds, scales) && n > 0;
     if (!args_ok) return invalid_arguments;
 
@@ -67,15 +74,36 @@ status_t dnnl_sum_primitive_desc_create(primitive_desc_iface_t **sum_pd_iface,
         dst_md = &dummy_dst_md;
     }
 
+    dnnl_sum_desc_t desc = {primitive_kind::sum, dst_md, n, scales, src_mds};
+    primitive_hashing::key_t key(
+            engine, reinterpret_cast<op_desc_t *>(&desc), attr, 0, {});
+    auto pd = primitive_cache().get_pd(key);
+
+    if (pd) {
+        return safe_ptr_assign(
+                *sum_pd_iface, new primitive_desc_iface_t(pd, engine));
+    }
+
     for (auto s = engine->get_sum_implementation_list(); *s; ++s) {
         sum_pd_t *sum_pd = nullptr;
         if ((*s)(&sum_pd, engine, attr, dst_md, n, scales, src_mds)
                 == success) {
-            auto status = safe_ptr_assign(
-                    *sum_pd_iface, new primitive_desc_iface_t(sum_pd, engine));
-            if (status != status::success) delete sum_pd;
-            return status;
+            pd.reset(sum_pd);
+            CHECK(safe_ptr_assign(
+                    *sum_pd_iface, new primitive_desc_iface_t(pd, engine)));
+            return status::success;
         }
     }
     return unimplemented;
+}
+
+} // namespace impl
+} // namespace dnnl
+
+status_t dnnl_sum_primitive_desc_create(primitive_desc_iface_t **sum_pd_iface,
+        const memory_desc_t *dst_md, int n, const float *scales,
+        const memory_desc_t *src_mds, const primitive_attr_t *attr,
+        engine_t *engine) {
+    return sum_primitive_desc_create(
+            sum_pd_iface, dst_md, n, scales, src_mds, attr, engine);
 }

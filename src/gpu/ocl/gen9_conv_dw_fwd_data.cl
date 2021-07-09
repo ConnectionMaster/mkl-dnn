@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -21,6 +21,11 @@
 #error "Kernel supports depth-wise convolutions only"
 #endif
 
+#ifdef DST_DT_S8
+#define DST_MB_BLOCK (MB_BLOCK * 2)
+#define DST_OC_BLOCK (OC_BLOCK * 2)
+#endif
+
 #define APPLY_POST_OPS_COMMON(nelems, accumulator, dest_data, mb_shift) \
     { \
         const int po_mb = mb_shift + mb; \
@@ -32,7 +37,8 @@
             po_mb_count = 1; \
         } \
         APPLY_POST_OPS_TRY_BURST(accumulator, DATA_T, dest_data, DATA_T, \
-                po_mb, po_mb_count, po_oc, SUB_GROUP_SIZE, get_local_id(0)); \
+                po_mb, po_mb_count, po_oc, SUB_GROUP_SIZE, \
+                get_sub_group_local_id()); \
     }
 
 __attribute__((reqd_work_group_size(LWS_0, LWS_1, LWS_2))) // attr:no-format
@@ -41,7 +47,7 @@ __attribute__((intel_reqd_sub_group_size(SUB_GROUP_SIZE))) // attr:no-format
 #endif
 __kernel void
 gen9_conv_dw_fwd(const __global DATA_T *src, const __global DATA_T *wei,
-        const __global DATA_T *bias, __global DATA_T *dst POST_OP_ARGS) {
+        const __global DATA_T *bias, __global DST_DATA_T *dst POST_OP_ARGS) {
 
 #if VER_8OW16C
     const int osp = get_global_id(1);
@@ -49,15 +55,24 @@ gen9_conv_dw_fwd(const __global DATA_T *src, const __global DATA_T *wei,
     const int ohw = osp % (OWB * OH);
     const int ow = (ohw % OWB) * OW_BLOCK;
     const int oh = ohw / OWB;
-    const int g = get_group_id(0) * OC_BLOCK;
+    const int g
+            = (get_group_id(0) * (LWS_0 / SUB_GROUP_SIZE) + get_sub_group_id())
+            * OC_BLOCK;
     const int mb = get_global_id(2) * MB_BLOCK;
 
     const int id = od * SD - PD;
     const int ih = oh * SH - PH;
     const int iw = ow * SW - PW;
-
+#ifdef DST_DT_S8 // 32c dst
+    const int G_32block = G % 32 ? (32 + G - (G % 32)) : G;
+    dst += mb * G_32block * OD * OH * OW
+            + (g / 32 * 32) * OD * OH * OW * MB_BLOCK
+            + (od * OH * OW + oh * OW + ow) * MB_BLOCK * (DST_OC_BLOCK)
+            + (g % 32);
+#else
     dst += mb * G * OD * OH * OW + g * OD * OH * OW * MB_BLOCK
             + (od * OH * OW + oh * OW + ow) * MB_BLOCK * OC_BLOCK;
+#endif
     src += mb * G * ID * IH * IW + g * ID * IH * IW * MB_BLOCK
             + (id * IH * IW + ih * IW + iw) * MB_BLOCK * IC_BLOCK;
     wei += g * KD * KH * KW;
@@ -123,13 +138,21 @@ gen9_conv_dw_fwd(const __global DATA_T *src, const __global DATA_T *wei,
         }
 #endif
 
-    DATA_T D00[OW_BLOCK];
+    DATA_T D00[OW_BLOCK] = {0};
 #if WITH_SUM
+#ifdef DST_DT_S8
+    __attribute__((opencl_unroll_hint(OW_BLOCK))) // attr:no-format
+    for (int k = 0; k < OW_BLOCK; k++) {
+        D00[k] = CONVERT_DATA_T(BLOCK_READ_DST(
+                (const __global DST_DATA_T *)&dst[k * DST_OC_BLOCK]));
+    }
+#else
     __attribute__((opencl_unroll_hint(OW_BLOCK))) // attr:no-format
     for (int k = 0; k < OW_BLOCK; k++) {
         D00[k] = AS_DATA_T(
                 BLOCK_READ((const __global BLOCK_DATA_T *)&dst[k * OC_BLOCK]));
     }
+#endif
 #endif
 
     APPLY_POST_OPS_COMMON(OW_BLOCK, S00, D00, 0);
@@ -137,14 +160,24 @@ gen9_conv_dw_fwd(const __global DATA_T *src, const __global DATA_T *wei,
     if (OW % OW_BLOCK == 0 || ow + OW_BLOCK <= OW) {
         __attribute__((opencl_unroll_hint)) // attr:no-format
         for (int k = 0; k < OW_BLOCK; k++) {
+#ifdef DST_DT_S8
+            BLOCK_WRITE_DST((__global DST_DATA_T *)&dst[k * DST_OC_BLOCK],
+                    CONVERT_DST_DATA_T(S00[k]));
+#else
             BLOCK_WRITE((__global BLOCK_DATA_T *)&dst[k * OC_BLOCK],
                     AS_UINT_T(S00[k]));
+#endif
         }
     } else {
         __attribute__((opencl_unroll_hint)) // attr:no-format
         for (int k = 0; k < OW % OW_BLOCK; k++) {
+#ifdef DST_DT_S8
+            BLOCK_WRITE_DST((__global DST_DATA_T *)&dst[k * DST_OC_BLOCK],
+                    CONVERT_DST_DATA_T(S00[k]));
+#else
             BLOCK_WRITE((__global BLOCK_DATA_T *)&dst[k * OC_BLOCK],
                     AS_UINT_T(S00[k]));
+#endif
         }
     }
 #endif
@@ -155,15 +188,26 @@ gen9_conv_dw_fwd(const __global DATA_T *src, const __global DATA_T *wei,
     const int ohw = osp % (OWB * OH);
     const int ow = (ohw % OWB) * OW_BLOCK;
     const int oh = ohw / OWB;
-    const int g = get_group_id(0) * OC_BLOCK;
+    const int g
+            = (get_group_id(0) * (LWS_0 / SUB_GROUP_SIZE) + get_sub_group_id())
+            * OC_BLOCK;
     const int mb = get_global_id(2) * MB_BLOCK;
 
     const int id = od * SD - PD;
     const int ih = oh * SH - PH;
     const int iw = ow * SW - PW;
 
+#ifdef DST_DT_S8 //32n32c dst
+    const int G_32block = G % 32 ? (32 + G - (G % 32)) : G;
+    dst += (mb / DST_MB_BLOCK) * G_32block * OD * OH * OW * DST_MB_BLOCK
+            + (mb % DST_MB_BLOCK) * DST_OC_BLOCK
+            + (g / DST_OC_BLOCK) * OD * OH * OW * DST_MB_BLOCK * DST_OC_BLOCK
+            + (od * OH * OW + oh * OW + ow) * DST_MB_BLOCK * DST_OC_BLOCK
+            + (g % DST_OC_BLOCK);
+#else
     dst += mb * G * OD * OH * OW + g * OD * OH * OW * MB_BLOCK
             + (od * OH * OW + oh * OW + ow) * MB_BLOCK * OC_BLOCK;
+#endif
     src += mb * G * ID * IH * IW + g * ID * IH * IW * MB_BLOCK
             + (id * IH * IW + ih * IW + iw) * MB_BLOCK * IC_BLOCK;
     wei += g * KD * KH * KW;
@@ -220,17 +264,34 @@ gen9_conv_dw_fwd(const __global DATA_T *src, const __global DATA_T *wei,
     DATA8_T D00;
     DATA8_T D01;
 #if WITH_SUM
+#ifdef DST_DT_S8
+    for (int i = 0; i < 8; ++i) {
+        D00[i] = CONVERT_DATA_T(
+                BLOCK_READ_DST((__global DST_DATA_T *)&dst[i * 32]));
+        D01[i] = CONVERT_DATA_T(
+                BLOCK_READ_DST((__global DST_DATA_T *)&dst[(i * 32) + 256]));
+    }
+#else
     D00 = AS_DATA8_T(BLOCK_READ8((const __global BLOCK_DATA_T *)dst));
     D01 = AS_DATA8_T(
             BLOCK_READ8((const __global BLOCK_DATA_T *)&dst[8 * OC_BLOCK]));
-
+#endif
 #endif
 
     APPLY_POST_OPS_COMMON(8, S00, D00, 0);
     APPLY_POST_OPS_COMMON(8, S01, D01, 8);
 
+#ifdef DST_DT_S8
+    for (int i = 0; i < 8; ++i) {
+        BLOCK_WRITE_DST((__global DST_DATA_T *)&dst[i * DST_OC_BLOCK],
+                CONVERT_DST_DATA_T(S00[i]));
+        BLOCK_WRITE_DST((__global DST_DATA_T *)&dst[(i + 8) * DST_OC_BLOCK],
+                CONVERT_DST_DATA_T(S01[i]));
+    }
+#else
     BLOCK_WRITE8((__global BLOCK_DATA_T *)&dst[0], AS_UINT8_T(S00));
     BLOCK_WRITE8((__global BLOCK_DATA_T *)&dst[8 * OC_BLOCK], AS_UINT8_T(S01));
+#endif
 
 #endif
     return;

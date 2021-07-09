@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020 Arm Ltd. and affiliates
+* Copyright 2020-2021 Arm Ltd. and affiliates
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -14,15 +14,7 @@
 * limitations under the License.
 *******************************************************************************/
 
-#include "oneapi/dnnl/dnnl_types.h"
-
-#include "common/c_types_map.hpp"
-#include "common/dnnl_thread.hpp"
-#include "common/type_helpers.hpp"
-#include "common/utils.hpp"
 #include "cpu/aarch64/acl_gemm_convolution.hpp"
-
-#include <cstring>
 
 namespace dnnl {
 namespace impl {
@@ -44,6 +36,7 @@ status_t acl_gemm_convolution_fwd_t<src_type, wei_type, dst_type,
     auto dst_base = CTX_OUT_MEM(dst_data_t *, DNNL_ARG_DST);
 
     bool with_bias = pd()->acp_.with_bias;
+    bool sum_with_eltwise = pd()->acp_.sum_with_eltwise;
 
     // Retrieve primitive resource and configured Compute Library objects
     auto *acl_resource = ctx.get_resource_mapper()->get<acl_resource_t>(this);
@@ -55,18 +48,17 @@ status_t acl_gemm_convolution_fwd_t<src_type, wei_type, dst_type,
     acl_obj.wei_tensor.allocator()->import_memory(
             const_cast<wei_data_t *>(wei_base));
     acl_obj.dst_tensor.allocator()->import_memory(dst_base);
-
-    // Retrieve extra bias memory from the scratchpad and copy from user memory
     if (with_bias) {
-        const auto scratchpad = ctx.get_scratchpad_grantor();
-        auto *bia_memory = scratchpad.template get<bia_data_t>(
-                memory_tracking::names::key_none);
-        size_t oc = acl_obj.bia_tensor.info()->tensor_shape()[0];
-        std::memcpy(bia_memory, bia_base, oc * sizeof(bia_data_t));
-        acl_obj.bia_tensor.allocator()->import_memory(bia_memory);
+        acl_obj.bia_tensor.allocator()->import_memory(
+                const_cast<bia_data_t *>(bia_base));
     }
 
     acl_obj.conv.run();
+
+    if (sum_with_eltwise) {
+        acl_obj.add.run();
+        acl_obj.act.run();
+    }
 
     acl_obj.src_tensor.allocator()->free();
     acl_obj.wei_tensor.allocator()->free();

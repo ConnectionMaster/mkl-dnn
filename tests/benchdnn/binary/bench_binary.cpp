@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -37,13 +37,33 @@ void check_correctness(const settings_t &s) {
     for_(const auto &i_post_ops : s.post_ops)
     for_(const auto &i_scratchpad_mode : s.scratchpad_mode)
     for (auto i_inplace : s.inplace) {
-        bool ok = s.sdims.size() == i_sdt.size()
-                && i_sdt.size() == i_stag.size()
-                && s.sdims.size() == 2; // expect just two inputs
-        if (!ok) SAFE_V(FAIL);
-
-        ok = i_alg > alg_t::BINARY_START && i_alg < alg_t::BINARY_END;
-        if (!ok) SAFE_V(FAIL);
+        // Expect exactly two inputs for problem dimensions.
+        static constexpr int n_inputs = 2;
+        if (s.sdims.size() != n_inputs) {
+            fprintf(stderr,
+                    "ERROR: binary driver: expect problem dimensions in format "
+                    "`A0xA1x...:B0xB1x...`.\n");
+            SAFE_V(FAIL);
+        }
+        if (i_sdt.size() != n_inputs) {
+            fprintf(stderr,
+                    "ERROR: binary driver: expect data types in format "
+                    "`DT:DT`.\n");
+            SAFE_V(FAIL);
+        }
+        if (i_stag.size() != n_inputs) {
+            fprintf(stderr,
+                    "ERROR: binary driver: expect format tags in format "
+                    "`TAG:TAG`.\n");
+            SAFE_V(FAIL);
+        }
+        if (!(i_alg > alg_t::BINARY_START && i_alg < alg_t::BINARY_END)) {
+            fprintf(stderr,
+                    "ERROR: binary driver: algorithm `%s` does not belong to "
+                    "binary algorithm type.\n",
+                    attr_t::post_ops_t::kind2str(i_alg));
+            SAFE_V(FAIL);
+        }
 
         // If src1 was provided shortened, fill the rest dimensions with `1` to
         // match ndims for source 0 and 1, e.g. 8x3x5:8
@@ -73,7 +93,7 @@ void check_correctness(const settings_t &s) {
         bool want_perf_report = false;
         parse_result(res, want_perf_report, status, pstr);
 
-        if (want_perf_report && bench_mode & PERF) {
+        if (want_perf_report && is_bench_mode(PERF)) {
             perf_report_t pr(s.perf_template);
             pr.report(&prb, &res, pstr);
         }

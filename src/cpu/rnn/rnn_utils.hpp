@@ -21,6 +21,7 @@
 
 #include "common/c_types_map.hpp"
 #include "common/memory_desc_wrapper.hpp"
+#include "common/primitive.hpp"
 #include "common/utils.hpp"
 
 #include "cpu/platform.hpp"
@@ -46,7 +47,7 @@
 
 #if DNNL_X64
 #define rnn_cell_execution_sig(f) \
-    dnnl_status_t f(const rnn_utils::rnn_conf_t &rnn, \
+    dnnl_status_t f(const exec_ctx_t &ctx, const rnn_utils::rnn_conf_t &rnn, \
             rnn_utils::cell_position_t cell_position, dst_layer_t *dst_layer_, \
             float *dst_iter_c_, gemm_acc_t *diff_src_layer_, \
             gemm_acc_t *diff_src_iter_, gemm_acc_t *diff_src_iter_c_, \
@@ -60,12 +61,13 @@
             float *diff_weights_projection_, float *diff_weights_peephole_, \
             float *diff_bias_, gates_t *ws_gates_, scratch_t *scratch_gates_, \
             ht_t *proj_ht_, gemm_acc_t *scratch_diff_ht_, gates_t *ws_grid_, \
-            scratch_t *scratch_cell_, dst_iter_t *dst_iter_, \
-            gemm_acc_t *amx_scratchpad, \
+            scratch_t *scratch_cell_, scratch_t *scratch_gates_blocked_, \
+            scratch_t *scratch_src_layer_, scratch_t *scratch_src_iter_, \
+            dst_iter_t *dst_iter_, gemm_acc_t *amx_scratchpad, \
             x64::brgemm_batch_element_t *addr_batch_global) const
 
 #define rnn_grid_execution_sig(f) \
-    dnnl_status_t f(const rnn_utils::rnn_conf_t &rnn, \
+    dnnl_status_t f(const exec_ctx_t &ctx, const rnn_utils::rnn_conf_t &rnn, \
             weights_t **weights_layer_, weights_t **weights_iter_, \
             weights_t **weights_projection_, const float *weights_peephole_, \
             const float *w_proj_comp, float **bias_, \
@@ -78,10 +80,11 @@
             gemm_acc_t *ws_diff_states_iter_c_, gates_t *ws_gates_, \
             ht_t *ws_ht_, gates_t *ws_grid_, scratch_t *scratch_gates_, \
             ht_t *scratch_ht_, gemm_acc_t *scratch_diff_ht_, \
-            scratch_t *scratch_cell_, gemm_acc_t *diff_weights_layer_, \
-            gemm_acc_t *diff_weights_iter_, float *diff_weights_projection_, \
-            float *diff_weights_peephole_, float *diff_bias_, \
-            gemm_acc_t *amx_scratchpad, \
+            scratch_t *scratch_cell_, scratch_t *scratch_gates_blocked_, \
+            scratch_t *scratch_src_layer_, scratch_t *scratch_src_iter_, \
+            gemm_acc_t *diff_weights_layer_, gemm_acc_t *diff_weights_iter_, \
+            float *diff_weights_projection_, float *diff_weights_peephole_, \
+            float *diff_bias_, gemm_acc_t *amx_scratchpad, \
             x64::brgemm_batch_element_t *addr_batch_global) const
 #else
 #define rnn_cell_execution_sig(f) \
@@ -188,95 +191,152 @@ enum data_type_conf_t {
     u8u8u8f32,
     f32u8f32f32,
     u8u8u8u8,
-    f32u8f32u8
+    f32u8f32u8,
+    s8s8s8f32,
+    f32s8f32f32,
+    s8s8s8s8,
+    f32s8f32s8
+};
+
+struct diff_src_brgemm_conf_t {
+    dim_t M = 0, N = 0, K = 0;
+
+    dim_t n_block = 0, N_blocks = 0, n_tail = 0;
+    dim_t m_block = 0, M_blocks = 0;
+
+    dim_t K_blocks = 0, k_block = 0, k_tail = 0;
+    dim_t Kpadded = 0;
+
+    dim_t N_iter = 0, N_layer = 0;
+    dim_t N_layer_blocks = 0, n_layer_tail = 0;
+    dim_t N_iter_blocks = 0, n_iter_tail = 0;
+    dim_t LDA = 0, LDB = 0, LDC = 0;
+
+#if DNNL_X64
+    x64::cpu_isa_t isa = x64::isa_any;
+#endif
+};
+
+struct diff_wei_brgemm_conf_t {
+    dim_t M = 0, M_layer = 0, M_iter = 0, N = 0, K = 0;
+
+    dim_t n_block = 0, N_blocks = 0, n_tail = 0;
+    dim_t m_block = 0, M_blocks = 0;
+    dim_t K_blocks = 0, k_block = 0, k_tail = 0;
+    dim_t Kpadded = 0;
+
+    dim_t LDA_layer = 0, LDA_iter = 0, LDB = 0, LDC_iter = 0, LDC_layer = 0;
+
+    bool global_transpose = false;
+
+#if DNNL_X64
+    x64::cpu_isa_t isa = x64::isa_any;
+#endif
 };
 
 struct rnn_conf_t {
     execution_direction_t exec_dir;
     data_type_conf_t dt_conf;
-    int n_layer, n_iter, n_dir, n_gates, n_states;
-    int mb;
-    int slc, sic, dhc, dic, dlc;
+    int n_layer = 0, n_iter = 0, n_dir = 0, n_gates = 0, n_states = 0;
+    int mb = 0;
+    int slc = 0, sic = 0, dhc = 0, dic = 0, dlc = 0;
     //int gates_ld, gates_nld, gates_ws_ld;
 
-    int n_parts_weights_layer;
+    int n_parts_weights_layer = 0;
     int parts_weights_layer[DNNL_RNN_MAX_N_PARTS];
     size_t part_weights_layer_pack_size[DNNL_RNN_MAX_N_PARTS];
 
-    int n_parts_weights_iter;
+    int n_parts_weights_iter = 0;
     int parts_weights_iter[DNNL_RNN_MAX_N_PARTS];
     size_t part_weights_iter_pack_size[DNNL_RNN_MAX_N_PARTS];
 
-    int n_parts_weights_projection;
+    int n_parts_weights_projection = 0;
     int parts_weights_projection[DNNL_RNN_MAX_N_PARTS];
     size_t part_weights_projection_pack_size[DNNL_RNN_MAX_N_PARTS];
 
-    int n_bias, n_parts_bias, parts_bias[DNNL_RNN_MAX_N_PARTS];
+    int n_bias = 0, n_parts_bias = 0, parts_bias[DNNL_RNN_MAX_N_PARTS];
 
     /* Size of packed data in bytes */
-    size_t weights_layer_comp_offset, weights_layer_pack_size;
-    size_t weights_iter_comp_offset, weights_iter_pack_size;
-    size_t weights_projection_comp_offset, weights_projection_pack_size;
+    size_t weights_layer_comp_offset = 0, weights_layer_pack_size = 0;
+    size_t weights_iter_comp_offset = 0, weights_iter_pack_size = 0;
+    size_t weights_projection_comp_offset = 0, weights_projection_pack_size = 0;
 
-    bool copy_bias;
-    int weights_layer_ld, weights_layer_nld;
-    int diff_weights_layer_ld, diff_weights_layer_nld;
-    int weights_iter_ld, weights_iter_nld;
-    int diff_weights_iter_ld, diff_weights_iter_nld;
-    int weights_projection_ld, weights_projection_nld;
-    int diff_weights_projection_ld, diff_weights_projection_nld;
+    bool copy_bias = 0;
+    int weights_layer_ld = 0, weights_layer_nld = 0;
+    int diff_weights_layer_ld = 0, diff_weights_layer_nld = 0;
+    int weights_iter_ld = 0, weights_iter_nld = 0;
+    int diff_weights_iter_ld = 0, diff_weights_iter_nld = 0;
+    int weights_projection_ld = 0, weights_projection_nld = 0;
+    int diff_weights_projection_ld = 0, diff_weights_projection_nld = 0;
 
-    int proj_ht_ld, proj_ht_nld;
+    int proj_ht_ld = 0, proj_ht_nld = 0;
 
-    int ws_gates_ld, ws_gates_nld;
-    int ws_ht_ld, ws_ht_nld;
-    int ws_states_layer_ld, ws_states_layer_nld;
-    int ws_states_iter_ld, ws_states_iter_nld;
-    int ws_states_iter_c_ld, ws_states_iter_c_nld;
-    int ws_diff_states_layer_ld, ws_diff_states_layer_nld;
-    int ws_diff_states_iter_ld, ws_diff_states_iter_nld;
-    int ws_diff_states_iter_c_ld, ws_diff_states_iter_c_nld;
+    int ws_gates_ld = 0, ws_gates_nld = 0;
+    int ws_ht_ld = 0, ws_ht_nld = 0;
+    int ws_states_layer_ld = 0, ws_states_layer_nld = 0;
+    int ws_states_iter_ld = 0, ws_states_iter_nld = 0;
+    int ws_states_iter_c_ld = 0, ws_states_iter_c_nld = 0;
+    int ws_diff_states_layer_ld = 0, ws_diff_states_layer_nld = 0;
+    int ws_diff_states_iter_ld = 0, ws_diff_states_iter_nld = 0;
+    int ws_diff_states_iter_c_ld = 0, ws_diff_states_iter_c_nld = 0;
 
-    int scratch_gates_ld, scratch_gates_nld;
-    int scratch_ht_ld, scratch_ht_nld;
-    int scratch_diff_ht_ld, scratch_diff_ht_nld;
+    int scratch_gates_ld = 0, scratch_gates_nld = 0;
+    int scratch_ht_ld = 0, scratch_ht_nld = 0;
+    int scratch_diff_ht_ld = 0, scratch_diff_ht_nld = 0;
 
-    int src_layer_ld_, src_layer_nld_;
-    int src_iter_ld_, src_iter_nld_;
-    int src_iter_c_ld_, src_iter_c_nld_;
-    int dst_layer_ld_, dst_layer_nld_;
-    int dst_iter_ld_, dst_iter_nld_;
-    int dst_iter_c_ld_, dst_iter_c_nld_;
+    int src_layer_ld_ = 0, src_layer_nld_ = 0;
+    int src_iter_ld_ = 0, src_iter_nld_ = 0;
+    int src_iter_c_ld_ = 0, src_iter_c_nld_ = 0;
+    int dst_layer_ld_ = 0, dst_layer_nld_ = 0;
+    int dst_iter_ld_ = 0, dst_iter_nld_ = 0;
+    int dst_iter_c_ld_ = 0, dst_iter_c_nld_ = 0;
 
-    int weights_iter_compensation_size, weights_layer_compensation_size;
-    bool is_fwd, is_training, is_lbr, is_lstm_peephole, is_lstm_projection;
-    bool use_workspace;
+    int weights_iter_compensation_size = 0, weights_layer_compensation_size = 0;
+    bool is_fwd = 0, is_training = 0, is_lbr = 0, is_lstm_peephole = 0,
+         is_lstm_projection = 0;
+    bool use_workspace = 0;
 
     // Size of workspace for each tensor in bytes
     // Notes:
     // 1. For non-LSTMP ws_states_iter_size == ws_states_layer_size. The corresponding
     //    pointers should point to the same places.
-    size_t ws_gates_size;
-    size_t ws_ht_size;
-    size_t ws_states_layer_size;
-    size_t ws_states_iter_size;
-    size_t ws_states_iter_c_size;
-    size_t ws_diff_states_layer_size;
-    size_t ws_diff_states_iter_size;
-    size_t ws_diff_states_iter_c_size;
-    size_t scratch_gates_size;
-    size_t scratch_ht_size;
-    size_t scratch_diff_ht_size;
-    size_t scratch_cell_size;
-    size_t ws_grid_comp_size;
-    size_t ws_per_cell;
-    size_t ws_bias_size;
+    size_t ws_gates_size = 0;
+    size_t ws_ht_size = 0;
+    size_t ws_states_layer_size = 0;
+    size_t ws_states_iter_size = 0;
+    size_t ws_states_iter_c_size = 0;
+    size_t ws_diff_states_layer_size = 0;
+    size_t ws_diff_states_iter_size = 0;
+    size_t ws_diff_states_iter_c_size = 0;
+    size_t scratch_gates_size = 0;
 
-    bool merge_gemm_iter, merge_gemm_layer, force_nocopy, use_layer_packed_gemm,
-            use_iter_packed_gemm, use_projection_packed_gemm;
-    int n_iter_scratch_gates;
+    size_t scratch_gates_blocked_size = 0;
+    size_t scratch_gates_blocked_nested_reorder_size = 0;
+    size_t scratch_src_layer_size = 0;
+    size_t scratch_src_layer_nested_reorder_size = 0;
+    size_t scratch_src_iter_size = 0;
+    size_t scratch_src_iter_nested_reorder_size = 0;
+
+    size_t scratch_ht_size = 0;
+    size_t scratch_diff_ht_size = 0;
+    size_t scratch_cell_size = 0;
+    size_t ws_grid_comp_size = 0;
+    size_t ws_per_cell = 0;
+    size_t ws_bias_size = 0;
+
+    bool merge_gemm_iter = false, merge_gemm_layer = false,
+         force_nocopy = false, use_layer_packed_gemm = false,
+         use_iter_packed_gemm = false, use_projection_packed_gemm = false;
+    int n_iter_scratch_gates = 0;
 
     inline bool is_int8() const {
+        return is_signed_int8() || is_unsigned_int8();
+    }
+    inline bool is_signed_int8() const {
+        return utils::one_of(
+                dt_conf, s8s8s8f32, f32s8f32f32, s8s8s8s8, f32s8f32s8);
+    }
+    inline bool is_unsigned_int8() const {
         return utils::one_of(
                 dt_conf, u8u8u8f32, f32u8f32f32, u8u8u8u8, f32u8f32u8);
     }
@@ -300,23 +360,24 @@ struct rnn_conf_t {
     inline bool skip_src_layer_copy() const {
         // Note: this currently always returns true
         return (exec_dir == l2r)
-                && utils::one_of(dt_conf, u8u8u8u8, u8u8u8f32, f32u8f32u8,
+                && utils::one_of(dt_conf, s8s8s8f32, f32s8f32f32, s8s8s8s8,
+                        f32s8f32s8, u8u8u8u8, u8u8u8f32, f32u8f32u8,
                         f32u8f32f32, all_f32, all_bf16);
     }
     inline bool skip_src_iter_copy() const {
         return (exec_dir == l2r) && (src_iter_ld_ > 0)
-                && utils::one_of(
-                        dt_conf, u8u8u8u8, u8u8u8f32, all_f32, all_bf16);
+                && utils::one_of(dt_conf, s8s8s8s8, s8s8s8f32, u8u8u8u8,
+                        u8u8u8f32, all_f32, all_bf16);
     }
     inline bool skip_dst_layer_copy() const {
         return (exec_dir == l2r)
-                && utils::one_of(
-                        dt_conf, u8u8u8u8, f32u8f32u8, all_f32, all_bf16);
+                && utils::one_of(dt_conf, s8s8s8s8, f32s8f32s8, u8u8u8u8,
+                        f32u8f32u8, all_f32, all_bf16);
     }
     inline bool skip_dst_iter_copy() const {
         return (exec_dir == l2r) && (dst_iter_ld_ > 0)
-                && utils::one_of(
-                        dt_conf, u8u8u8u8, u8u8u8f32, all_f32, all_bf16);
+                && utils::one_of(dt_conf, s8s8s8s8, s8s8s8f32, u8u8u8u8,
+                        u8u8u8f32, all_f32, all_bf16);
     }
 
     inline dim_t src_layer_ld(cell_position_t cell_position) const {
@@ -411,6 +472,9 @@ struct rnn_conf_t {
     }
     bool is_brgemm;
 
+    diff_src_brgemm_conf_t diff_src_brgemm;
+    diff_wei_brgemm_conf_t diff_wei_brgemm;
+
     dim_t M, N, K1, K2;
 
     dim_t LDB1, LDB2;
@@ -430,6 +494,8 @@ struct rnn_conf_t {
 
     dim_t Nproj, Nproj_blocks, nproj_tail;
     dim_t LDAproj, LDBproj, LDCproj[4];
+    int dhc_block_peephole, dhc_tail_peephole, dhc_blocks_peephole;
+    bool brgemm_fwd_iter_layer_fuse_possible = false;
 
     dim_t nthr;
 #if DNNL_X64
@@ -443,7 +509,9 @@ bool is_ldgoi(const memory_desc_wrapper &md);
 bool is_ldio(const memory_desc_wrapper &md);
 bool is_ldoi(const memory_desc_wrapper &md);
 bool is_ldigo_blocked(const memory_desc_wrapper &md);
+bool is_ldgoi_blocked(const memory_desc_wrapper &md);
 bool is_ldio_blocked(const memory_desc_wrapper &md);
+bool is_ldoi_blocked(const memory_desc_wrapper &md);
 
 int get_good_ld(int dim, int sizeof_dt);
 
@@ -489,10 +557,23 @@ bool init_conf(rnn_conf_t &rnn, const rnn_desc_t &rd,
             rnn.dt_conf = u8u8u8u8;
         else
             rnn.dt_conf = f32u8f32u8;
-    } else {
+    } else if (dst_layer_d.data_type() == data_type::s8) {
+        if (IMPLICATION(
+                    src_iter_d.md_, src_iter_d.data_type() == data_type::s8))
+            rnn.dt_conf = s8s8s8s8;
+        else
+            rnn.dt_conf = f32s8f32s8;
+
+    } else if (dst_layer_d.data_type() == data_type::f32) {
         if (IMPLICATION(
                     src_iter_d.md_, src_iter_d.data_type() == data_type::u8))
             rnn.dt_conf = u8u8u8f32;
+        else if (IMPLICATION(src_iter_d.md_,
+                         src_iter_d.data_type() == data_type::s8))
+            rnn.dt_conf = s8s8s8f32;
+        else if (IMPLICATION(src_layer_d.md_,
+                         src_layer_d.data_type() == data_type::s8))
+            rnn.dt_conf = f32s8f32f32;
         else
             rnn.dt_conf = f32u8f32f32;
     }
@@ -593,7 +674,7 @@ bool init_conf(rnn_conf_t &rnn, const rnn_desc_t &rd,
             : dst_iter_c_d.blocking_desc().strides[2];
 
     /* Set the correct number of weights parts */
-    bool is_orig_gru = rd.cell_kind == alg_kind::vanilla_gru;
+    const bool is_orig_gru = rd.cell_kind == alg_kind::vanilla_gru;
     rnn.n_parts_weights_layer = 1;
     rnn.parts_weights_layer[0] = rnn.n_gates;
     rnn.parts_weights_layer[1] = 0;
@@ -611,16 +692,19 @@ bool init_conf(rnn_conf_t &rnn, const rnn_desc_t &rd,
 
     /* Decide wich gemm implementation to use: packed/nonpacked jit/cblas
      * and if to mergre gemm across iterations */
-    bool is_f32 = rnn.dt_conf == all_f32, is_bf16 = rnn.dt_conf == all_bf16;
-    bool is_gru = utils::one_of(
+    const bool is_f32 = rnn.dt_conf == all_f32,
+               is_bf16 = rnn.dt_conf == all_bf16;
+    const bool is_gru = utils::one_of(
             rd.cell_kind, alg_kind::vanilla_gru, alg_kind::lbr_gru);
-    bool is_inference = !rnn.is_training;
+    const bool is_inference = !rnn.is_training;
 
     // To be able to merge the GEMM on the layer input when not
     // copying, we need to have a trivial stride for the T dimension
-    auto src_layer_is_trivial_stride = src_layer_d.blocking_desc().strides[0]
+    const auto src_layer_is_trivial_stride
+            = src_layer_d.blocking_desc().strides[0]
             == (rnn.src_layer_ld_ * rnn.mb);
-    auto dst_layer_is_trivial_stride = dst_layer_d.blocking_desc().strides[0]
+    const auto dst_layer_is_trivial_stride
+            = dst_layer_d.blocking_desc().strides[0]
             == (rnn.dst_layer_ld_ * rnn.mb);
 
     rnn.merge_gemm_layer = (!rnn.is_brgemm)
@@ -667,7 +751,7 @@ bool init_conf(rnn_conf_t &rnn, const rnn_desc_t &rd,
 
     /* Set packed gemm sizes */
     /* TODO: investigate the benefit of mixing packed and non-packed weights parts */
-    auto set_pack_sizes
+    const auto set_pack_sizes
             = [&](bool merge, bool &do_pack, size_t &weights_pack_size,
                       int &n_parts, int *parts, size_t *parts_pack_size,
                       size_t &comp_offset, int ic, int oc, int weights_oc,
@@ -675,9 +759,9 @@ bool init_conf(rnn_conf_t &rnn, const rnn_desc_t &rd,
         bool pack = true;
         weights_pack_size = 0;
         for (int p = 0; p < n_parts; p++) {
-            dim_t m_p = rnn.is_fwd ? (parts[p] * oc) : ic;
-            dim_t k_p = rnn.is_fwd ? ic : (parts[p] * oc);
-            dim_t n_p = merge ? rnn.mb * rnn.n_iter : rnn.mb;
+            const dim_t m_p = rnn.is_fwd ? (parts[p] * oc) : ic;
+            const dim_t k_p = rnn.is_fwd ? ic : (parts[p] * oc);
+            const dim_t n_p = merge ? rnn.mb * rnn.n_iter : rnn.mb;
             bool pack_part = true;
 
             dnnl_status_t st = dnnl_success;
@@ -685,6 +769,14 @@ bool init_conf(rnn_conf_t &rnn, const rnn_desc_t &rd,
                 case all_f32:
                     st = sgemm_pack_get_size("A", "N", "N", &m_p, &n_p, &k_p,
                             &m_p, &data_ld, &parts_pack_size[p], &pack_part);
+                    break;
+                case s8s8s8f32:
+                case f32s8f32f32:
+                case s8s8s8s8:
+                case f32s8f32s8:
+                    st = gemm_s8u8s32_pack_get_size("A", "N", "N", &m_p, &n_p,
+                            &k_p, &m_p, &data_ld, &parts_pack_size[p],
+                            &pack_part);
                     break;
                 case u8u8u8f32:
                 case f32u8f32f32:
@@ -759,26 +851,27 @@ void set_conf(rnn_conf_t &rnn, const rnn_desc_t &rd,
         const memory_desc_wrapper &diff_weights_projection_d) {
 
     // Set leading dimensions for input weights arrays depending on input format
-    auto set_dims = [&](const memory_desc_wrapper &md, int &ld, int &nld) {
-        ld = 0;
-        nld = 0;
-        if (md.is_blocking_desc()) {
-            if (is_ldigo(md)) {
-                ld = (int)md.blocking_desc().strides[2];
-                nld = md.dims()[2];
-            } else if (is_ldgoi(md)) {
-                ld = (int)md.blocking_desc().strides[4];
-                nld = md.dims()[3] * md.dims()[4];
-            } else if (is_ldoi(md)) {
-                ld = (int)md.blocking_desc().strides[3];
-                nld = md.dims()[3];
-            } else if (is_ldio(md)) {
-                ld = (int)md.blocking_desc().strides[2];
-                nld = md.dims()[2];
-            } else
-                assert(!"unsupported weights format");
-        }
-    };
+    const auto set_dims
+            = [&](const memory_desc_wrapper &md, int &ld, int &nld) {
+                  ld = 0;
+                  nld = 0;
+                  if (md.is_blocking_desc()) {
+                      if (is_ldigo(md)) {
+                          ld = (int)md.blocking_desc().strides[2];
+                          nld = md.dims()[2];
+                      } else if (is_ldgoi(md)) {
+                          ld = (int)md.blocking_desc().strides[4];
+                          nld = md.dims()[3] * md.dims()[4];
+                      } else if (is_ldoi(md)) {
+                          ld = (int)md.blocking_desc().strides[3];
+                          nld = md.dims()[3];
+                      } else if (is_ldio(md)) {
+                          ld = (int)md.blocking_desc().strides[2];
+                          nld = md.dims()[2];
+                      } else
+                          assert(!"unsupported weights format");
+                  }
+              };
     set_dims(weights_layer_d, rnn.weights_layer_ld, rnn.weights_layer_nld);
     set_dims(weights_iter_d, rnn.weights_iter_ld, rnn.weights_iter_nld);
     set_dims(weights_projection_d, rnn.weights_projection_ld,
@@ -895,13 +988,13 @@ template <typename T>
 struct ws_gates_aoc {
     ws_gates_aoc(const rnn_conf_t &rnn, T *data)
         : gates_(data, rnn.ws_gates_nld, rnn.ws_gates_ld), DHC_(rnn.dhc) {}
-    T &operator()(int batch, int gate, int dhc) {
+    T &operator()(int batch, int gate, int dhc) const {
         return gates_(batch, gate * DHC_ + dhc);
     }
 
 private:
-    dnnl::impl::utils::array_offset_calculator<T, 2> gates_;
-    int DHC_;
+    const dnnl::impl::utils::array_offset_calculator<T, 2> gates_;
+    const int DHC_;
 };
 using ws_gates_aoc_t = ws_gates_aoc<float>;
 using ws_gates_aoc_s32_t = ws_gates_aoc<int32_t>;
@@ -910,10 +1003,10 @@ template <typename T>
 struct ws_ht_aoc {
     ws_ht_aoc(const rnn_conf_t &rnn, T *data)
         : ht_(data, rnn.ws_ht_nld, rnn.ws_ht_ld) {}
-    T &operator()(int batch, int dhc) { return ht_(batch, dhc); }
+    T &operator()(int batch, int dhc) const { return ht_(batch, dhc); }
 
 private:
-    dnnl::impl::utils::array_offset_calculator<T, 2> ht_;
+    const dnnl::impl::utils::array_offset_calculator<T, 2> ht_;
 };
 
 template <typename T>
@@ -921,13 +1014,13 @@ struct scratch_gates_aoc {
     scratch_gates_aoc(const rnn_conf_t &rnn, T *data)
         : gates_(data, rnn.scratch_gates_nld, rnn.scratch_gates_ld)
         , DHC_(rnn.dhc) {}
-    T &operator()(int batch, int gate, int dhc) {
+    T &operator()(int batch, int gate, int dhc) const {
         return gates_(batch, gate * DHC_ + dhc);
     }
 
 private:
-    dnnl::impl::utils::array_offset_calculator<T, 2> gates_;
-    int DHC_;
+    const dnnl::impl::utils::array_offset_calculator<T, 2> gates_;
+    const int DHC_;
 };
 using scratch_gates_aoc_t = scratch_gates_aoc<float>;
 using scratch_gates_aoc_s32_t = scratch_gates_aoc<int32_t>;
@@ -936,10 +1029,10 @@ template <typename T>
 struct scratch_ht_aoc {
     scratch_ht_aoc(const rnn_conf_t &rnn, T *data)
         : ht_(data, rnn.scratch_ht_nld, rnn.scratch_ht_ld) {}
-    T &operator()(int batch, int dhc) { return ht_(batch, dhc); }
+    T &operator()(int batch, int dhc) const { return ht_(batch, dhc); }
 
 private:
-    dnnl::impl::utils::array_offset_calculator<T, 2> ht_;
+    const dnnl::impl::utils::array_offset_calculator<T, 2> ht_;
 };
 using scratch_ht_aoc_t = scratch_ht_aoc<float>;
 using scratch_ht_aoc_s32_t = scratch_ht_aoc<int32_t>;
@@ -948,19 +1041,21 @@ template <typename T>
 struct weights_peephole_aoc_t {
     weights_peephole_aoc_t(const rnn_conf_t &rnn, T *data)
         : weights_peephole_(data, 3, rnn.dhc) {}
-    T &operator()(int g, int dhc) { return weights_peephole_(g, dhc); }
+    T &operator()(int g, int dhc) const { return weights_peephole_(g, dhc); }
 
 private:
-    utils::array_offset_calculator<T, 2> weights_peephole_;
+    const utils::array_offset_calculator<T, 2> weights_peephole_;
 };
 
 struct bias_aoc_t {
     bias_aoc_t(const rnn_conf_t &rnn, const float *data)
         : bias_(data, rnn.n_bias, rnn.dhc) {}
-    const float &operator()(int bias_n, int dhc) { return bias_(bias_n, dhc); }
+    const float &operator()(int bias_n, int dhc) const {
+        return bias_(bias_n, dhc);
+    }
 
 private:
-    dnnl::impl::utils::array_offset_calculator<const float, 2> bias_;
+    const dnnl::impl::utils::array_offset_calculator<const float, 2> bias_;
 };
 
 template <typename T>
@@ -969,10 +1064,10 @@ struct ws_states_layer_aoc {
         : state_(data, rnn.ws_states_layer_nld, leading_dim) {}
     ws_states_layer_aoc(const rnn_conf_t &rnn, T *data)
         : state_(data, rnn.ws_states_layer_nld, rnn.ws_states_layer_ld) {}
-    T &operator()(int batch, int dhc) { return state_(batch, dhc); }
+    T &operator()(int batch, int dhc) const { return state_(batch, dhc); }
 
 private:
-    dnnl::impl::utils::array_offset_calculator<T, 2> state_;
+    const dnnl::impl::utils::array_offset_calculator<T, 2> state_;
 };
 
 template <typename T>
@@ -981,10 +1076,10 @@ struct ws_states_iter_aoc {
         : state_(data, rnn.ws_states_iter_nld, leading_dim) {}
     ws_states_iter_aoc(const rnn_conf_t &rnn, T *data)
         : state_(data, rnn.ws_states_iter_nld, rnn.ws_states_iter_ld) {}
-    T &operator()(int batch, int dhc) { return state_(batch, dhc); }
+    T &operator()(int batch, int dhc) const { return state_(batch, dhc); }
 
 private:
-    dnnl::impl::utils::array_offset_calculator<T, 2> state_;
+    const dnnl::impl::utils::array_offset_calculator<T, 2> state_;
 };
 
 template <typename T>
@@ -993,10 +1088,10 @@ struct ws_states_iter_c_aoc {
         : state_(data, rnn.ws_states_iter_c_nld, leading_dim) {}
     ws_states_iter_c_aoc(const rnn_conf_t &rnn, T *data)
         : state_(data, rnn.ws_states_iter_c_nld, rnn.ws_states_iter_c_ld) {}
-    T &operator()(int batch, int dhc) { return state_(batch, dhc); }
+    T &operator()(int batch, int dhc) const { return state_(batch, dhc); }
 
 private:
-    dnnl::impl::utils::array_offset_calculator<T, 2> state_;
+    const dnnl::impl::utils::array_offset_calculator<T, 2> state_;
 };
 
 template <typename T>
@@ -1004,10 +1099,12 @@ struct ws_diff_states_layer_aoc {
     ws_diff_states_layer_aoc(const rnn_conf_t &rnn, T *data)
         : diff_states_layer_(data, rnn.ws_diff_states_layer_nld,
                 rnn.ws_diff_states_layer_ld) {}
-    T &operator()(int batch, int dhc) { return diff_states_layer_(batch, dhc); }
+    T &operator()(int batch, int dhc) const {
+        return diff_states_layer_(batch, dhc);
+    }
 
 private:
-    dnnl::impl::utils::array_offset_calculator<T, 2> diff_states_layer_;
+    const dnnl::impl::utils::array_offset_calculator<T, 2> diff_states_layer_;
 };
 
 template <typename T>
@@ -1015,10 +1112,12 @@ struct ws_diff_states_iter_aoc {
     ws_diff_states_iter_aoc(const rnn_conf_t &rnn, T *data)
         : diff_states_iter_(data, rnn.ws_diff_states_iter_nld,
                 rnn.ws_diff_states_iter_ld) {}
-    T &operator()(int batch, int dhc) { return diff_states_iter_(batch, dhc); }
+    T &operator()(int batch, int dhc) const {
+        return diff_states_iter_(batch, dhc);
+    }
 
 private:
-    dnnl::impl::utils::array_offset_calculator<T, 2> diff_states_iter_;
+    const dnnl::impl::utils::array_offset_calculator<T, 2> diff_states_iter_;
 };
 
 template <typename T>
@@ -1026,12 +1125,12 @@ struct ws_diff_states_iter_c_aoc {
     ws_diff_states_iter_c_aoc(const rnn_conf_t &rnn, T *data)
         : diff_states_iter_c_(data, rnn.ws_diff_states_iter_c_nld,
                 rnn.ws_diff_states_iter_c_ld) {}
-    T &operator()(int batch, int dhc) {
+    T &operator()(int batch, int dhc) const {
         return diff_states_iter_c_(batch, dhc);
     }
 
 private:
-    dnnl::impl::utils::array_offset_calculator<T, 2> diff_states_iter_c_;
+    const dnnl::impl::utils::array_offset_calculator<T, 2> diff_states_iter_c_;
 };
 
 struct ws_diff_w_iter_aoc_t {
@@ -1039,13 +1138,14 @@ struct ws_diff_w_iter_aoc_t {
         : diff_weights_iter_(
                 data, rnn.diff_weights_iter_nld, rnn.diff_weights_iter_ld)
         , DHC_(rnn.dhc) {}
-    float &operator()(int sic, int gate, int dhc) {
+    float &operator()(int sic, int gate, int dhc) const {
         return diff_weights_iter_(sic, gate * DHC_ + dhc);
     }
 
 private:
-    dnnl::impl::utils::array_offset_calculator<float, 2> diff_weights_iter_;
-    int DHC_;
+    const dnnl::impl::utils::array_offset_calculator<float, 2>
+            diff_weights_iter_;
+    const int DHC_;
 };
 
 } // namespace rnn_utils

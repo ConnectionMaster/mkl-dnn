@@ -33,6 +33,12 @@ float compute_binary_scalar(alg_kind_t alg, float x, float y) {
         case binary_min: return nstl::min(x, y);
         case binary_mul: return x * y;
         case binary_sub: return x - y;
+        case binary_ge: return x >= y;
+        case binary_gt: return x > y;
+        case binary_le: return x <= y;
+        case binary_lt: return x < y;
+        case binary_eq: return x == y;
+        case binary_ne: return x != y;
         default: assert(!"not supported operation!"); return NAN;
     }
 }
@@ -62,6 +68,7 @@ float compute_eltwise_scalar_fwd(
         case eltwise_round: d = round_fwd(s); break;
         case eltwise_logsigmoid: d = logsigmoid_fwd(s); break;
         case eltwise_mish: d = mish_fwd(s); break;
+        case eltwise_hardswish: d = hardswish_fwd(s); break;
         case eltwise_relu_use_dst_for_bwd: d = relu_fwd(s, alpha); break;
         case eltwise_tanh_use_dst_for_bwd: d = tanh_fwd(s); break;
         case eltwise_elu_use_dst_for_bwd: d = elu_fwd(s, alpha); break;
@@ -101,6 +108,7 @@ float compute_eltwise_scalar_bwd(
         case eltwise_gelu_erf: ds = gelu_erf_bwd(dd, s); break;
         case eltwise_logsigmoid: ds = logsigmoid_bwd(dd, s); break;
         case eltwise_mish: ds = mish_bwd(dd, s); break;
+        case eltwise_hardswish: ds = hardswish_bwd(dd, s); break;
         case eltwise_relu_use_dst_for_bwd:
             ds = relu_bwd_use_dst(dd, s, alpha);
             break;
@@ -125,7 +133,9 @@ float compute_eltwise_scalar_bwd(
 ref_binary_scalar_t::ref_binary_scalar_t(alg_kind_t alg) : alg_(alg) {
     assert(utils::one_of(alg_, alg_kind::binary_add, alg_kind::binary_max,
             alg_kind::binary_min, alg_kind::binary_mul, alg_kind::binary_div,
-            alg_kind::binary_sub));
+            alg_kind::binary_sub, alg_kind::binary_ge, alg_kind::binary_gt,
+            alg_kind::binary_le, alg_kind::binary_lt, alg_kind::binary_eq,
+            alg_kind::binary_ne));
 }
 
 ref_binary_scalar_t::ref_binary_scalar_t(
@@ -144,7 +154,7 @@ ref_eltwise_scalar_fwd_t::ref_eltwise_scalar_fwd_t(
             eltwise_bounded_relu, eltwise_soft_relu, eltwise_logistic,
             eltwise_exp, eltwise_gelu_tanh, eltwise_swish, eltwise_log,
             eltwise_clip, eltwise_clip_v2, eltwise_pow, eltwise_gelu_erf,
-            eltwise_round, eltwise_relu_use_dst_for_bwd,
+            eltwise_round, eltwise_hardswish, eltwise_relu_use_dst_for_bwd,
             eltwise_tanh_use_dst_for_bwd, eltwise_elu_use_dst_for_bwd,
             eltwise_sqrt_use_dst_for_bwd, eltwise_logistic_use_dst_for_bwd,
             eltwise_exp_use_dst_for_bwd, eltwise_clip_v2_use_dst_for_bwd));
@@ -159,7 +169,8 @@ float ref_eltwise_scalar_fwd_t::compute_scalar(float s) const {
     return compute_eltwise_scalar_fwd(alg_, s, alpha_, beta_) * scale_;
 }
 
-ref_post_ops_t::ref_post_ops_t(const post_ops_t &po) : po_(po) {
+ref_post_ops_t::ref_post_ops_t(const post_ops_t &po, bool skip_sum)
+    : po_(po), skip_sum_(skip_sum) {
     for (auto idx = 0; idx < po_.len(); ++idx) {
         const auto &e = po_.entry_[idx];
         if (po_.contain(primitive_kind::eltwise, idx)) {
@@ -178,7 +189,11 @@ status_t ref_post_ops_t::execute(float &res, const args_t &args) const {
     for (auto idx = 0; idx < po_.len(); ++idx) {
         const auto &e = po_.entry_[idx];
         switch (e.kind) {
-            case primitive_kind::sum: res += e.sum.scale * args.dst_val; break;
+            case primitive_kind::sum:
+                if (!skip_sum_) {
+                    res += e.sum.scale * (args.dst_val - e.sum.zero_point);
+                }
+                break;
             case primitive_kind::eltwise:
                 res = it_eltwise_po->compute_scalar(res);
                 it_eltwise_po++;
@@ -195,7 +210,7 @@ status_t ref_post_ops_t::execute(float &res, const args_t &args) const {
 
                 const auto &b = e.binary;
                 const memory_desc_wrapper src1_binary_po_d(b.src1_desc);
-                dims_t l_dims_binary_po;
+                dims_t l_dims_binary_po {};
                 utils::l_dims_by_l_offset(
                         l_dims_binary_po, args.l_offset, dst_dims, dst_ndims);
                 int mask_binary_po = utils::get_dims_mask(

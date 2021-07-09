@@ -17,10 +17,12 @@
 #ifndef CPU_X64_JIT_AVX512_CORE_AMX_CONV_KERNEL_HPP
 #define CPU_X64_JIT_AVX512_CORE_AMX_CONV_KERNEL_HPP
 
+#include <queue>
+
 #include "common/c_types_map.hpp"
 #include "common/memory_tracking.hpp"
 
-#include "cpu/x64/injectors/jit_uni_eltwise_injector.hpp"
+#include "cpu/x64/injectors/jit_uni_postops_injector.hpp"
 #include "cpu/x64/jit_avx512_core_bf16cvt.hpp"
 #include "cpu/x64/jit_generator.hpp"
 #include "cpu/x64/jit_primitive_conf.hpp"
@@ -57,11 +59,13 @@ private:
     const reg64_t reg_src_zero_point = r9;
     const reg64_t reg_filt = r10;
     const reg64_t aux_reg_filt = r11;
+    const reg64_t aux_reg_filt_d = r15;
 
     const reg64_t reg_oc_blocks = r12;
     const reg64_t reg_icb = r13;
     const reg64_t reg_oi = r14;
     const reg64_t reg_kj = rax;
+    const reg64_t reg_ki = rbx;
     const reg64_t reg_overflow = reg_kj;
     const reg64_t reg_scratch = rsi;
 
@@ -74,8 +78,10 @@ private:
     void prepare_output(int ur_w);
     void store_output(int ur_w, bool last_oc_block_flag);
     void compute_ker(int ur_w, int pad_l, int pad_r,
-            ic_block_t last_ic_block_flag, bool h_padded);
+            ic_block_t last_ic_block_flag, bool padded);
     void kh_loop(int ur_w, int pad_l, int pad_r, ic_block_t last_ic_block_flag,
+            bool handle_h_pad);
+    void kd_loop(int ur_w, int pad_l, int pad_r, ic_block_t last_ic_block_flag,
             bool handle_h_pad);
     void icb_loop(int ur_w, int pad_l, int pad_r, bool handle_h_pad);
     void unroll_width(const bool h_padding);
@@ -109,16 +115,16 @@ struct jit_avx512_core_amx_copy_to_wbuffer_t : public jit_generator {
 private:
     jit_conv_conf_t jcp;
 
-    const reg64_t reg_src = rax;
-    const reg64_t reg_dst = rbx;
-    const reg64_t reg_tmp = rdx;
+    const reg64_t &reg_src = rax;
+    const reg64_t &reg_dst = rbx;
+    const reg64_t &reg_tmp = rdx;
 
-    const Xbyak::Opmask kmask_load = Xbyak::Opmask(2);
+    const Xbyak::Opmask &kmask_load = k2;
 
-    const Xbyak::Zmm zmm_src = Xbyak::Zmm(0);
-    const Xbyak::Zmm zmm_dst = Xbyak::Zmm(1);
-    const Xbyak::Zmm zmm_idx = Xbyak::Zmm(2);
-    const Xbyak::Zmm zmm_zero = Xbyak::Zmm(3);
+    const Xbyak::Zmm &zmm_src = zmm0;
+    const Xbyak::Zmm &zmm_dst = zmm1;
+    const Xbyak::Zmm &zmm_idx = zmm2;
+    const Xbyak::Zmm &zmm_zero = zmm3;
 
     void generate() override;
 };
@@ -135,48 +141,44 @@ struct jit_avx512_core_amx_copy_to_pbuffer_t : public jit_generator {
 private:
     jit_conv_conf_t jcp;
 
-    const reg64_t reg_inp_ptr = r15;
-    const reg64_t reg_out_ptr = r14;
+    const reg64_t &reg_inp_ptr = r15;
+    const reg64_t &reg_out_ptr = r14;
 
-    const reg64_t reg_aux_inp_ptr = r13;
-    const reg64_t reg_aux_out_ptr = r12;
+    const reg64_t &reg_aux_inp_ptr = r13;
+    const reg64_t &reg_aux_out_ptr = r12;
 
-    const reg64_t reg_khp = r10;
+    const reg64_t &reg_khp = r10;
 
     /* relow stuff */
-    const reg64_t reg_kht = r11;
-    const reg64_t reg_tov = r9;
-    const reg64_t reg_bov = r8;
-    const reg64_t reg_kwp = rax;
-    const reg64_t reg_lov = reg_aux_inp_ptr;
-    const reg64_t reg_rov = rbx;
-    const reg64_t reg_save_out_ptr = rdx;
-    const reg64_t reg_cnt = rbp;
+    const reg64_t &reg_kht = r11;
+    const reg64_t &reg_tov = r9;
+    const reg64_t &reg_bov = r8;
+    const reg64_t &reg_kwp = rax;
+    const reg64_t &reg_lov = reg_aux_inp_ptr;
+    const reg64_t &reg_rov = rbx;
+    const reg64_t &reg_save_out_ptr = rdx;
+    const reg64_t &reg_cnt = rbp;
     /* relow stuff */
 
     /* non-relow stuff */
-    const reg64_t reg_kdp = abi_not_param1;
-    const reg64_t reg_kdc = rbp;
-    const reg64_t reg_khc = r11;
+    const reg64_t &reg_kdp = abi_not_param1;
+    const reg64_t &reg_kdc = rbp;
+    const reg64_t &reg_khc = r11;
 
-    const reg64_t reg_icb = r9;
+    const reg64_t &reg_kh_over = r8;
+    const reg64_t &reg_tover = rax;
+    const reg64_t &reg_bover = rbx;
 
-    const reg64_t reg_kh_over = r8;
-    const reg64_t reg_tover = rax;
-    const reg64_t reg_bover = rbx;
-
-    const reg64_t reg_owb = rdx;
+    const reg64_t &reg_owb = rdx;
     /* non-relow stuff */
 
-    const reg64_t reg_tmp = rsi;
+    const reg64_t &reg_tmp = rsi;
 
-    const Xbyak::Opmask ktail_mask = Xbyak::Opmask(2);
-    const Xbyak::Opmask ktail_load = Xbyak::Opmask(3);
-    const Xbyak::Opmask ktail_stor = Xbyak::Opmask(4);
+    const Xbyak::Opmask &ktail_mask = k2;
 
-    const Xbyak::Ymm ymm_tmp = Xbyak::Ymm(0);
-    const Xbyak::Zmm zmm_tmp = Xbyak::Zmm(0);
-    const Xbyak::Zmm zmm_zero = Xbyak::Zmm(1);
+    const Xbyak::Ymm &ymm_tmp = ymm0;
+    const Xbyak::Zmm &zmm_tmp = zmm0;
+    const Xbyak::Zmm &zmm_zero = zmm1;
 
     void generate() override;
     void copy_row(int icb);
@@ -187,48 +189,16 @@ private:
 struct jit_avx512_core_amx_fwd_kernel_t : public jit_generator {
     DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_avx512_core_amx_fwd_kernel_t)
 
-    jit_avx512_core_amx_fwd_kernel_t(
-            const jit_conv_conf_t &ajcp, const primitive_attr_t &attr)
-        : jit_generator(nullptr, MAX_CODE_SIZE, true, avx512_core_amx)
-        , jcp(ajcp)
-        , attr_(attr)
-        , eltwise_injector_(nullptr)
-        , copy_to_wbuffer_(nullptr)
-        , zp_pbuff_kernel_(nullptr) {
-        if (jcp.with_eltwise)
-            eltwise_injector_ = new jit_uni_eltwise_injector_f32<avx512_common>(
-                    this, jcp.eltwise);
-        copy_to_pbuffer_ = new jit_avx512_core_amx_copy_to_pbuffer_t(jcp);
-        if (jcp.is_relo)
-            copy_to_wbuffer_ = new jit_avx512_core_amx_copy_to_wbuffer_t(jcp);
-    }
+    jit_avx512_core_amx_fwd_kernel_t(const jit_conv_conf_t &ajcp,
+            const primitive_attr_t &attr, const memory_desc_t &dst_md);
 
-    status_t create_kernel() override {
-        CHECK(jit_generator::create_kernel());
-        CHECK(copy_to_pbuffer_->create_kernel());
-        if (jcp.is_relo) CHECK(copy_to_wbuffer_->create_kernel());
-        if (jcp.req_zero_point_buffer) {
-            CHECK(safe_ptr_assign(zp_pbuff_kernel_,
-                    new jit_avx512_core_amx_compute_zp_pbuff_t(jcp)));
-            CHECK(zp_pbuff_kernel_->create_kernel());
-        }
-        return status::success;
-    }
-    ~jit_avx512_core_amx_fwd_kernel_t() {
-        delete eltwise_injector_;
-        delete copy_to_pbuffer_;
-        delete copy_to_wbuffer_;
-        delete zp_pbuff_kernel_;
-    }
-
-    static bool post_ops_ok(
-            const jit_conv_conf_t &jcp, const primitive_attr_t &attr);
+    status_t create_kernel() override;
 
     static status_t init_conf(jit_conv_conf_t &jcp,
             const convolution_desc_t &cd, memory_desc_t &src_pd,
             memory_desc_t &weights_pd, memory_desc_t &dst_pd,
-            memory_desc_t &bias_pd, const primitive_attr_t &attr, int nthreads);
-    static void init_scratchpad(memory_tracking::registrar_t &scratchpad,
+            memory_desc_t &bias_pd, primitive_attr_t &attr, int nthreads);
+    static status_t init_scratchpad(memory_tracking::registrar_t &scratchpad,
             const jit_conv_conf_t &jcp, const primitive_attr_t &attr);
 
     inline int accum_with_upper_bound(
@@ -299,60 +269,75 @@ struct jit_avx512_core_amx_fwd_kernel_t : public jit_generator {
     }
 
 private:
-    jit_uni_eltwise_injector_f32<avx512_common> *eltwise_injector_;
-    jit_avx512_core_amx_copy_to_pbuffer_t *copy_to_pbuffer_;
-    jit_avx512_core_amx_copy_to_wbuffer_t *copy_to_wbuffer_;
-    jit_avx512_core_amx_compute_zp_pbuff_t *zp_pbuff_kernel_;
+    constexpr static int isa_simd_width_
+            = cpu_isa_traits<avx512_common>::vlen / sizeof(float);
+    std::unique_ptr<injector::jit_uni_postops_injector_t<avx512_core>>
+            postops_injector_;
+    std::unique_ptr<jit_avx512_core_amx_copy_to_pbuffer_t> copy_to_pbuffer_;
+    std::unique_ptr<jit_avx512_core_amx_copy_to_wbuffer_t> copy_to_wbuffer_;
+    std::unique_ptr<jit_avx512_core_amx_compute_zp_pbuff_t> zp_pbuff_kernel_;
 
     enum {
         zmm_idx_limit_bf16 = 29,
         zmm_idx_limit_int8 = 27,
     };
 
-    int prv_width_;
-    int row_count_;
-    bool is_store_done_;
-    bool is_buffer_empty_;
+    int prv_width_ = 0;
+    int row_count_ = 0;
+    bool is_store_done_ = false;
+    bool is_buffer_empty_ = true;
+
+    struct w_pad_output {
+        int l_pad_output;
+        int r_pad_output;
+        w_pad_output(int l_, int r_) : l_pad_output(l_), r_pad_output(r_) {}
+    };
+    std::queue<w_pad_output> w_padding;
 
     /* data regs */
-    const Xbyak::Reg64 reg_inp_ptr = r15;
-    const Xbyak::Reg64 reg_wei_ptr = r14;
-    const Xbyak::Reg64 reg_out_ptr = r13;
-    const Xbyak::Reg64 reg_wsp_ptr = r12;
+    const Xbyak::Reg64 &reg_inp_ptr = r15;
+    const Xbyak::Reg64 &reg_wei_ptr = r14;
+    const Xbyak::Reg64 &reg_out_ptr = r13;
+    const Xbyak::Reg64 &reg_wsp_ptr = r12;
 
-    const Xbyak::Reg64 reg_kd = rsi;
+    const Xbyak::Reg64 &reg_kd = r9;
 
-    const Xbyak::Reg64 reg_bias = r11;
-    const Xbyak::Reg64 reg_ptr_scales = r10;
-    const Xbyak::Reg64 reg_ptr_sum_scale = r9;
-    const Xbyak::Reg64 reg_aux_saturation = reg_ptr_sum_scale;
+    const Xbyak::Reg64 &reg_bias = r11;
+    const Xbyak::Reg64 &reg_ptr_scales = r10;
+    const Xbyak::Reg64 &reg_ptr_sum_scale = r9;
+    const Xbyak::Reg64 &reg_ptr_sum_zp = abi_not_param1;
+    const Xbyak::Reg64 &reg_aux_saturation = reg_ptr_sum_scale;
 
-    const Xbyak::Reg64 reg_inp_stride = rbx;
-    const Xbyak::Reg64 reg_wei_stride = rdx;
+    const Xbyak::Reg64 &reg_inp_stride = rbx;
+    const Xbyak::Reg64 &reg_wei_stride = rdx;
     // zero-point computation
-    const Xbyak::Reg64 reg_zp_compensation = rax;
-    const Xbyak::Reg64 reg_src_zero_point = r8;
-    const Xbyak::Reg64 reg_zero_point_pbuff = rsi;
-    const Xbyak::Reg64 reg_dst_zero_point = abi_not_param1;
+    const Xbyak::Reg64 &reg_zp_compensation = rax;
+    const Xbyak::Reg64 &reg_src_zero_point = r8;
+    const Xbyak::Reg64 &reg_zero_point_pbuff = rsi;
+    const Xbyak::Reg64 &reg_dst_zero_point = abi_not_param1;
 
     // rbp - reserved for EVEX compression
-    const Xbyak::Reg64 reg_last_h = abi_not_param1;
-    const Xbyak::Reg64 reg_jmp_blk = reg_last_h;
+    const Xbyak::Reg64 &reg_last_h = abi_not_param1;
+    const Xbyak::Reg64 &reg_jmp_blk = reg_last_h;
 
     // temporary, used in generate() function only
-    const Xbyak::Reg64 reg_oc_blocks = rax;
-    const Xbyak::Reg64 reg_tmp = r8;
+    const Xbyak::Reg64 &reg_oc_blocks = rax;
+    const Xbyak::Reg64 &reg_tmp = r8;
 
-    const Xbyak::Opmask ktail_mask = Xbyak::Opmask(2);
+    const Xbyak::Opmask &ktail_mask = k2;
 
-    const Xbyak::Zmm zmm_bias = Xbyak::Zmm(31);
-    const Xbyak::Zmm zmm_saturation = zmm_bias;
-    const Xbyak::Zmm zmm_zero = Xbyak::Zmm(30);
-    const Xbyak::Zmm zmm_prev_dst = Xbyak::Zmm(29);
+    const Xbyak::Zmm &zmm_bias = zmm31;
+    const Xbyak::Zmm &zmm_saturation = zmm_bias;
+    const Xbyak::Zmm &zmm_zero = zmm30;
+    const Xbyak::Zmm &zmm_prev_dst = zmm29;
+    const Xbyak::Zmm &zmm_sum_zp = zmm26;
     /* zero-point */
-    const Xbyak::Zmm zmm_zp = Xbyak::Zmm(29);
-    const Xbyak::Zmm zmm_src_zp = Xbyak::Zmm(28);
-    const Xbyak::Zmm zmm_dst_zp = Xbyak::Zmm(27);
+    const Xbyak::Zmm &zmm_zp = zmm29;
+    const Xbyak::Zmm &zmm_src_zp = zmm28;
+    const Xbyak::Zmm &zmm_dst_zp = zmm27;
+
+    const Xbyak::Reg64 &bin_injector_helper_reg_1 = r14;
+    const Xbyak::Reg64 &bin_injector_helper_reg_2 = r15;
 
     // AUX: Steps, shifts and offsets
     size_t get_inp_icb_step() const;
@@ -380,12 +365,11 @@ private:
 
     void prepare_output(int tail);
     void init_runtime_counters(bool start_with_last_tile_block);
-    bool maybe_eltwise(int position);
     size_t reduce_to_block(const int block_size, const int pad_output);
     size_t reduce_to_blocked_dims(const int dim_size, const int block_size,
             const int s_pad_output, const int e_pad_output);
-    void cvt2ps(data_type_t type_in, Xbyak::Zmm ymm_in,
-            const Xbyak::Operand &op, bool mask_flag);
+    void cvt2ps(data_type_t type_in, const Xbyak::Zmm &ymm_in,
+            const Xbyak::Operand &op, bool mask_flag = false);
     Xbyak::Zmm zmm_out(const int idx) {
         const int upper_limit = jcp.src_dt == data_type::bf16
                 ? zmm_idx_limit_bf16
@@ -395,22 +379,37 @@ private:
         return Xbyak::Zmm(idx);
     }
     Xbyak::Ymm ymm_mask(
-            const Xbyak::Ymm zmm_in, bool mask_flag, bool store = false);
+            const Xbyak::Ymm &zmm_in, bool mask_flag, bool store = false);
     Xbyak::Zmm zmm_mask(
-            const Xbyak::Zmm zmm_in, bool mask_flag, bool store = false);
-
+            const Xbyak::Zmm &zmm_in, bool mask_flag, bool store = false);
+    void apply_sum(const Xbyak::Zmm &zmm_out, const float *p_sum_scale,
+            const int32_t *p_sum_zp, const Xbyak::Address &addr,
+            const bool mask_flag);
+    void apply_postops(const Xbyak::Zmm &zmm_out, const float *p_sum_scale,
+            const int32_t *p_sum_zp, const Xbyak::Address &addr,
+            const bool mask_flag, const size_t off, const int ocb);
     void store_output_vector_bf16(
-            const Xbyak::Zmm zmm_out, int ocb, int h, int w);
-    void store_output_vector_int8(const Xbyak::Zmm zmm_out, int ocb, int h,
+            const Xbyak::Zmm &zmm_out, int ocb, int h, int w);
+    void store_output_vector_int8(const Xbyak::Zmm &zmm_out, int ocb, int h,
             int w, const bool compute_zp, const int zp_h, const int zp_w);
-    void store_output_vector(const Xbyak::Zmm zmm_out, int ocb, int h, int w,
+    void store_output_vector(const Xbyak::Zmm &zmm_out, int ocb, int h, int w,
             const bool compute_zp = false, const int zp_h = 0,
             const int zp_w = 0);
     void store_output(int width, int tail, bool do_store,
+            const bool handle_h_block, const int t_pad_output,
+            const int b_pad_output, const int l_pad_output,
+            const int r_pad_output, const bool is_last_oh_block,
+            const bool zp_3d_pad = false);
+    void interleave_store(int width, int const t_pad_output,
+            int const b_pad_output, const bool zp_3d_pad = false);
+    void compute_icb_loop(int width, bool do_store, const bool handle_h_block,
+            const int t_pad_output, const int b_pad_output,
+            const int l_pad_output, const int r_pad_output,
+            const bool zp_3d_pad, const bool is_last_oh_block = false);
+    void dispatch_icb_loop(int width, bool do_store, const int l_pad_output,
+            const int r_pad_output, const bool zp_3d_pad);
+    void dispatch_zp_3d_compute(int width, bool do_store,
             const int l_pad_output, const int r_pad_output);
-    void interleave_store(int width);
-    void compute_icb_loop(int width, bool do_store, const int l_pad_output,
-            const int r_pad_output);
     void compute_ow_loop();
 
     void generate() override;
@@ -429,33 +428,33 @@ private:
     jit_conv_conf_t jcp;
 
     // pointers
-    const reg64_t reg_ptr_inp = r15;
-    const reg64_t reg_ptr_out = r14;
+    const reg64_t &reg_ptr_inp = r15;
+    const reg64_t &reg_ptr_out = r14;
 
     // auxiliary pointers
-    const reg64_t reg_ptr_aux_inp_h = r13;
-    const reg64_t reg_ptr_aux_inp_w = r12;
-    const reg64_t reg_ptr_aux_out = r11;
+    const reg64_t &reg_ptr_aux_inp_h = r13;
+    const reg64_t &reg_ptr_aux_inp_w = r12;
+    const reg64_t &reg_ptr_aux_out = r11;
 
     // variables
-    const reg64_t reg_khp = r10; // kh padding
-    const reg64_t reg_tov = r9; // top overflow
-    const reg64_t reg_bov = r8; // bottom overflow
-    const reg64_t reg_kwp = rax; // kw padding
-    const reg64_t reg_lov = rbx; // left overflow
-    const reg64_t reg_rov = abi_not_param1; // right overflow
+    const reg64_t &reg_khp = r10; // kh padding
+    const reg64_t &reg_tov = r9; // top overflow
+    const reg64_t &reg_bov = r8; // bottom overflow
+    const reg64_t &reg_kwp = rax; // kw padding
+    const reg64_t &reg_lov = rbx; // left overflow
+    const reg64_t &reg_rov = abi_not_param1; // right overflow
 
     // counters
-    const reg64_t reg_cnt_khp = rdx;
-    const reg64_t reg_cnt_tmp = rbp;
-    const reg64_t reg_cnt_ocb = rsi;
+    const reg64_t &reg_cnt_khp = rdx;
+    const reg64_t &reg_cnt_tmp = rbp;
+    const reg64_t &reg_cnt_ocb = rsi;
 
-    const reg64_t reg_tmp = reg_cnt_tmp;
+    const reg64_t &reg_tmp = reg_cnt_tmp;
 
-    const Xbyak::Opmask ktail_mask = Xbyak::Opmask(2);
+    const Xbyak::Opmask &ktail_mask = k2;
 
-    const Xbyak::Zmm zmm_tmp = Xbyak::Zmm(1);
-    const Xbyak::Zmm zmm_zero = Xbyak::Zmm(0);
+    const Xbyak::Zmm &zmm_tmp = zmm1;
+    const Xbyak::Zmm &zmm_zero = zmm0;
 
     void generate() override;
     void copy_row(bool is_masked);
@@ -486,13 +485,12 @@ struct jit_avx512_core_amx_bwd_data_kernel_t : public jit_generator {
         delete bwd_data_copy_kernel_;
     }
 
-    static bool post_ops_ok(
-            const jit_conv_conf_t &jcp, const primitive_attr_t &attr);
+    static bool post_ops_ok(const jit_conv_conf_t &jcp, primitive_attr_t &attr);
 
     static status_t init_conf(jit_conv_conf_t &jcp,
             const convolution_desc_t &cd, memory_desc_t &diff_src_pd,
             memory_desc_t &weights_pd, memory_desc_t &diff_dst_pd,
-            memory_desc_t *bias_pd, const primitive_attr_t &attr, int nthreads);
+            memory_desc_t *bias_pd, primitive_attr_t &attr, int nthreads);
     static void init_scratchpad(memory_tracking::registrar_t &scratchpad,
             const jit_conv_conf_t &jcp, const primitive_attr_t &attr);
 
@@ -510,40 +508,42 @@ private:
     jit_uni_eltwise_injector_f32<avx512_common> *eltwise_injector_;
     jit_avx512_core_amx_bwd_data_copy_kernel_t *bwd_data_copy_kernel_;
 
-    int prv_width_;
-    int row_count_;
-    bool is_store_done_;
-    bool is_buffer_empty_;
+    int prv_width_ = 0;
+    int row_count_ = 0;
+    bool is_store_done_ = false;
+    bool is_buffer_empty_ = true;
 
     /* data regs */
-    const Xbyak::Reg64 reg_inp_ptr = r15;
-    const Xbyak::Reg64 reg_wei_ptr = r14;
-    const Xbyak::Reg64 reg_out_ptr = r13;
-    const Xbyak::Reg64 reg_wsp_ptr = r12;
+    const Xbyak::Reg64 &reg_inp_ptr = r15;
+    const Xbyak::Reg64 &reg_wei_ptr = r14;
+    const Xbyak::Reg64 &reg_out_ptr = r13;
+    const Xbyak::Reg64 &reg_wsp_ptr = r12;
 
-    const Xbyak::Reg64 reg_bias = r11;
-    const Xbyak::Reg64 reg_ptr_scales = r10;
-    const Xbyak::Reg64 reg_ptr_sum_scale = r9;
-    const Xbyak::Reg64 reg_aux_saturation = reg_ptr_sum_scale;
+    const Xbyak::Reg64 &reg_bias = r11;
+    const Xbyak::Reg64 &reg_ptr_scales = r10;
+    const Xbyak::Reg64 &reg_ptr_sum_scale = r9;
+    const Xbyak::Reg64 &reg_ptr_sum_zp = abi_not_param1;
+    const Xbyak::Reg64 &reg_aux_saturation = reg_ptr_sum_scale;
 
-    const Xbyak::Reg64 reg_aux_inp_ptr = r8;
-    const Xbyak::Reg64 reg_inp_stride = rbx;
-    const Xbyak::Reg64 reg_wei_stride = rdx;
+    const Xbyak::Reg64 &reg_aux_inp_ptr = r8;
+    const Xbyak::Reg64 &reg_inp_stride = rbx;
+    const Xbyak::Reg64 &reg_wei_stride = rdx;
 
     // rsi - free and available
     // rbp - reserved for EVEX compression
-    const Xbyak::Reg64 reg_last_h = abi_not_param1;
+    const Xbyak::Reg64 &reg_last_h = abi_not_param1;
 
     // temporary, used in generate() function only
-    const Xbyak::Reg64 reg_ic_blocks = rax;
-    const Xbyak::Reg64 reg_tmp = reg_aux_inp_ptr;
+    const Xbyak::Reg64 &reg_ic_blocks = rax;
+    const Xbyak::Reg64 &reg_tmp = reg_aux_inp_ptr;
 
-    const Xbyak::Opmask ktail_mask = Xbyak::Opmask(2);
+    const Xbyak::Opmask &ktail_mask = k2;
 
-    const Xbyak::Zmm zmm_bias = Xbyak::Zmm(31);
-    const Xbyak::Zmm zmm_saturation = zmm_bias;
-    const Xbyak::Zmm zmm_zero = Xbyak::Zmm(30);
-    const Xbyak::Zmm zmm_prev_dst = Xbyak::Zmm(29);
+    const Xbyak::Zmm &zmm_bias = zmm31;
+    const Xbyak::Zmm &zmm_saturation = zmm_bias;
+    const Xbyak::Zmm &zmm_zero = zmm30;
+    const Xbyak::Zmm &zmm_prev_dst = zmm29;
+    const Xbyak::Zmm &zmm_sum_zp = zmm28;
 
     // AUX: Steps, shifts and offsets
     size_t get_inp_kh_step() const;
@@ -568,18 +568,19 @@ private:
     void init_runtime_counters(bool start_with_last_tile_block);
 
     bool maybe_eltwise(int position);
-    void cvt2ps(data_type_t type_in, Xbyak::Zmm ymm_in,
-            const Xbyak::Operand &op, bool mask_flag);
+    void cvt2ps(data_type_t type_in, const Xbyak::Zmm &ymm_in,
+            const Xbyak::Operand &op, bool mask_flag = false);
     Xbyak::Ymm ymm_mask(
-            const Xbyak::Ymm zmm_in, bool mask_flag, bool store = false);
+            const Xbyak::Ymm &zmm_in, bool mask_flag, bool store = false);
     Xbyak::Zmm zmm_mask(
-            const Xbyak::Zmm zmm_in, bool mask_flag, bool store = false);
+            const Xbyak::Zmm &zmm_in, bool mask_flag, bool store = false);
 
     void store_output_vector_bf16(
-            const Xbyak::Zmm zmm_out, int icb, int ihb, int iw);
+            const Xbyak::Zmm &zmm_out, int icb, int ihb, int iw);
     void store_output_vector_int8(
-            const Xbyak::Zmm zmm_out, int icb, int ihb, int iw);
-    void store_output_vector(const Xbyak::Zmm zmm_out, int icb, int ih, int iw);
+            const Xbyak::Zmm &zmm_out, int icb, int ihb, int iw);
+    void store_output_vector(
+            const Xbyak::Zmm &zmm_out, int icb, int ih, int iw);
     void store_output(int width, bool do_store);
     void interleave_store(int width);
     void compute_ocb_loop(int width, bool do_store);

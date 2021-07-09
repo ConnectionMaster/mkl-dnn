@@ -103,13 +103,12 @@ static int init_pd(dnnl_engine_t engine, const prb_t *prb,
     attr_args_t attr_args;
     attr_args.prepare_output_scales(prb->attr, prb->scales, prb->oc);
     attr_args.prepare_binary_post_op_mds(prb->attr, 2, dst_dims);
-    auto dnnl_attr = create_dnnl_attr(prb->attr, attr_args);
+    auto dnnl_attr = make_benchdnn_dnnl_wrapper(
+            create_dnnl_attr(prb->attr, attr_args));
 
     dnnl_status_t init_status = dnnl_success;
     init_status = dnnl_primitive_desc_create(
             &ippd, &ipd, dnnl_attr, engine, nullptr);
-
-    dnnl_primitive_attr_destroy(dnnl_attr);
 
     if (init_status == dnnl_unimplemented)
         return res->state = UNIMPLEMENTED, OK;
@@ -120,14 +119,32 @@ static int init_pd(dnnl_engine_t engine, const prb_t *prb,
     if (maybe_skip(res->impl_name)) {
         BENCHDNN_PRINT(2, "SKIPPED: oneDNN implementation: %s\n",
                 res->impl_name.c_str());
-        DNN_SAFE(dnnl_primitive_desc_destroy(ippd), WARN);
         return res->state = SKIPPED, res->reason = SKIP_IMPL_HIT, OK;
     } else {
         BENCHDNN_PRINT(
                 5, "oneDNN implementation: %s\n", res->impl_name.c_str());
     }
 
+    SAFE(check_pd_w_and_wo_attr(res, prb->attr, ipd), WARN);
+
     return OK;
+}
+
+bool need_src_init(const prb_t *prb) {
+    return !(prb->dir == BWD_D);
+}
+
+bool need_wei_init(const prb_t *prb) {
+    return !(prb->dir & FLAG_BWD && prb->dir & FLAG_WEI);
+}
+
+bool need_bia_init(const prb_t *prb) {
+    return need_wei_init(prb);
+}
+
+bool need_dst_init(const prb_t *prb) {
+    return !(prb->dir & FLAG_FWD)
+            || (prb->attr.post_ops.find(attr_t::post_ops_t::SUM) >= 0);
 }
 
 int fill_src(
@@ -136,7 +153,7 @@ int fill_src(
     const int range = c.f_max - c.f_min + 1;
 
     dnnl::impl::parallel_nd(prb->mb, prb->ic, prb->id, prb->ih, prb->iw,
-            [&](int mb, int ic, int id, int ih, int iw) {
+            [&](int64_t mb, int64_t ic, int64_t id, int64_t ih, int64_t iw) {
                 const int gen
                         = 101 * id + 103 * ih + 107 * iw + 109 * mb + 113 * ic;
                 const float sparsity = prb->ic < 5 ? 1.f : c.f_sparsity;
@@ -160,7 +177,7 @@ int fill_wei(
     const int range = c.f_max - c.f_min + 1;
 
     dnnl::impl::parallel_nd(prb->oc, prb->ic, prb->id, prb->ih, prb->iw,
-            [&](int oc, int ic, int kd, int kh, int kw) {
+            [&](int64_t oc, int64_t ic, int64_t kd, int64_t kh, int64_t kw) {
                 const int gen = 127 * kd + 131 * kh + 137 * kw + 139 * oc
                         + 149 * ic + 7;
                 const float sparsity = prb->ic < 5 ? 1.f : c.f_sparsity;
@@ -210,7 +227,7 @@ int fill_dst(
     const auto &c = prb->cfg[DST];
     const int range = c.f_max - c.f_min + 1;
 
-    dnnl::impl::parallel_nd(prb->mb, prb->oc, [&](int mb, int oc) {
+    dnnl::impl::parallel_nd(prb->mb, prb->oc, [&](int64_t mb, int64_t oc) {
         const int gen = 173 * mb + 179 * oc;
         const bool non_base = flip_coin(gen, c.f_sparsity);
         const float value = non_base ? c.f_min + gen * 1 % range : c.f_base;
@@ -257,17 +274,17 @@ int doit(const prb_t *prb, res_t *res) {
     if (bench_mode == LIST) return res->state = LISTED, OK;
 
     check_known_skipped_case(prb, res);
+    check_sum_post_ops(prb->attr, res);
     if (res->state == SKIPPED) return OK;
 
-    dnnl_primitive_t ip {};
-    SAFE(init_prim(&ip, init_pd, prb, res), WARN);
+    benchdnn_dnnl_wrapper_t<dnnl_primitive_t> prim;
+    SAFE(init_prim(prim, init_pd, prb, res), WARN);
     if (res->state == SKIPPED || res->state == UNIMPLEMENTED) return OK;
 
     const_dnnl_primitive_desc_t const_pd;
-    DNN_SAFE(dnnl_primitive_get_primitive_desc(ip, &const_pd), CRIT);
+    DNN_SAFE(dnnl_primitive_get_primitive_desc(prim, &const_pd), CRIT);
 
     if (check_mem_size(const_pd) != OK) {
-        DNN_SAFE_V(dnnl_primitive_destroy(ip));
         return res->state = SKIPPED, res->reason = NOT_ENOUGH_RAM, OK;
     }
 
@@ -308,10 +325,10 @@ int doit(const prb_t *prb, res_t *res) {
     dnn_mem_t bia_fp(bia_md, fp, tag::x, test_engine);
     dnn_mem_t dst_fp(dst_md, fp, tag::abx, test_engine);
 
-    SAFE(fill_src(prb, src_dt, src_fp, res), WARN);
-    SAFE(fill_wei(prb, wei_dt, wei_fp, res), WARN);
-    SAFE(fill_bia(prb, bia_dt, bia_fp, res), WARN);
-    SAFE(fill_dst(prb, dst_dt, dst_fp, res), WARN);
+    if (need_src_init(prb)) SAFE(fill_src(prb, src_dt, src_fp, res), WARN);
+    if (need_wei_init(prb)) SAFE(fill_wei(prb, wei_dt, wei_fp, res), WARN);
+    if (need_bia_init(prb)) SAFE(fill_bia(prb, bia_dt, bia_fp, res), WARN);
+    if (need_dst_init(prb)) SAFE(fill_dst(prb, dst_dt, dst_fp, res), WARN);
 
     args_t args;
 
@@ -323,9 +340,9 @@ int doit(const prb_t *prb, res_t *res) {
         args.set(DNNL_ARG_SCRATCHPAD, scratchpad_dt);
         args.set(binary_po_args, binary_po_dt);
 
-        SAFE(execute_and_wait(ip, args), WARN);
+        SAFE(execute_and_wait(prim, args), WARN);
 
-        if (bench_mode & CORR) {
+        if (is_bench_mode(CORR)) {
             compute_ref_fwd(test_engine, prb, src_fp, wei_fp, bia_fp,
                     binary_po_fp, dst_fp);
             compare::compare_t cmp;
@@ -340,9 +357,9 @@ int doit(const prb_t *prb, res_t *res) {
         args.set(DNNL_ARG_DIFF_SRC, src_dt);
         args.set(DNNL_ARG_SCRATCHPAD, scratchpad_dt);
 
-        SAFE(execute_and_wait(ip, args), WARN);
+        SAFE(execute_and_wait(prim, args), WARN);
 
-        if (bench_mode & CORR) {
+        if (is_bench_mode(CORR)) {
             compute_ref_bwd_d(prb, src_fp, wei_fp, dst_fp);
             compare::compare_t cmp;
             cmp.set_threshold(prb->cfg[SRC].eps);
@@ -357,9 +374,9 @@ int doit(const prb_t *prb, res_t *res) {
         args.set(DNNL_ARG_DIFF_BIAS, bia_dt);
         args.set(DNNL_ARG_SCRATCHPAD, scratchpad_dt);
 
-        SAFE(execute_and_wait(ip, args), WARN);
+        SAFE(execute_and_wait(prim, args), WARN);
 
-        if (bench_mode & CORR) {
+        if (is_bench_mode(CORR)) {
             compute_ref_bwd_w(prb, src_fp, wei_fp, bia_fp, dst_fp);
             compare::compare_t cmp;
             cmp.set_threshold(prb->cfg[WEI].eps);
@@ -375,11 +392,7 @@ int doit(const prb_t *prb, res_t *res) {
         }
     }
 
-    measure_perf(res->timer, ip, args);
-
-    DNN_SAFE_V(dnnl_primitive_destroy(ip));
-
-    return OK;
+    return measure_perf(res->timer, prim, args);
 }
 
 } // namespace ip

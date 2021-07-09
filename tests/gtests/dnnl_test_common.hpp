@@ -54,6 +54,7 @@
 #include "src/common/float16.hpp"
 #include "src/common/memory_desc_wrapper.hpp"
 #include "src/common/nstl.hpp"
+#include "src/common/primitive_cache.hpp"
 #include "tests/gtests/test_malloc.hpp"
 #include "tests/test_thread.hpp"
 
@@ -78,6 +79,13 @@ using dnnl::impl::f16_support::float16_t;
     } while (0)
 #endif
 
+// XXX: Using EXPECT_NE in 'if' statement raises a warning when GCC compiler is
+// used: suggest explicit braces to avoid ambiguous 'else'
+#define GTEST_EXPECT_NE(val1, val2) \
+    do { \
+        EXPECT_NE(val1, val2); \
+    } while (0)
+
 using memory = dnnl::memory;
 
 bool is_current_test_failed();
@@ -99,7 +107,8 @@ inline int get_vendor_id(const std::string &vendor) {
 
 inline bool is_nvidia_gpu(const dnnl::engine &eng) {
 #ifdef DNNL_WITH_SYCL
-    const int nvidia_vendor_id = get_vendor_id("nvidia");
+    if (eng.get_kind() != dnnl::engine::kind::gpu) return false;
+    const uint32_t nvidia_vendor_id = get_vendor_id("nvidia");
     const auto device = dnnl::sycl_interop::get_device(eng);
     const auto eng_vendor_id
             = device.get_info<cl::sycl::info::device::vendor_id>();
@@ -109,12 +118,15 @@ inline bool is_nvidia_gpu(const dnnl::engine &eng) {
 }
 
 inline bool unsupported_data_type(memory::data_type dt, dnnl::engine eng) {
-    dnnl::engine::kind kind = eng.get_kind();
-
     bool supported = true; // optimism
+
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_NONE
+    dnnl::engine::kind kind = eng.get_kind();
     if (kind == dnnl::engine::kind::cpu)
         supported = dnnl::impl::cpu::platform::has_data_type_support(
                 memory::convert_to_c(dt));
+#endif
+
 #ifdef DNNL_SYCL_CUDA
     if (is_nvidia_gpu(eng)) {
         switch (dt) {
@@ -251,6 +263,7 @@ struct mapped_ptr_t {
 
     operator T *() { return ptr_; }
     operator const T *() const { return ptr_; }
+    operator bool() const { return ptr_ != nullptr; }
 
 private:
     const memory *mem_;
@@ -371,6 +384,15 @@ static void fill_data(const memory::dim size, const memory &mem,
         double sparsity = 1., bool init_negs = false) {
     auto data_ptr = map_memory<data_t>(mem);
     fill_data<data_t>(size, data_ptr, sparsity, init_negs);
+}
+
+template <typename data_t>
+static void remove_zeroes(const memory &mem) {
+    size_t nelems = mem.get_desc().get_size() / sizeof(data_t);
+    auto data_ptr = map_memory<data_t>(mem);
+    dnnl::impl::parallel_nd(nelems, [&](memory::dim n) {
+        if (data_ptr[n] == data_t(0)) data_ptr[n] += data_t(1);
+    });
 }
 
 template <typename data_t>
@@ -601,16 +623,36 @@ bool catch_expected_failures(const F &f, bool expect_to_fail,
 namespace test {
 inline dnnl::memory make_memory(
         const dnnl::memory::desc &md, const dnnl::engine &eng) {
-#if defined(TEST_DNNL_DPCPP_BUFFER)
+
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_SYCL
+    if (eng.get_kind() == dnnl::engine::kind::cpu) {
+        return dnnl::memory(md, eng);
+    }
+#endif
+
+#if defined(TEST_DNNL_OCL_USM)
+    return dnnl::ocl_interop::make_memory(
+            md, eng, dnnl::ocl_interop::memory_kind::usm);
+#elif defined(TEST_DNNL_DPCPP_BUFFER)
     return dnnl::sycl_interop::make_memory(
             md, eng, dnnl::sycl_interop::memory_kind::buffer);
 #else
     return dnnl::memory(md, eng);
 #endif
 }
+
 inline dnnl::memory make_memory(
         const dnnl::memory::desc &md, const dnnl::engine &eng, void *handle) {
-#if defined(TEST_DNNL_DPCPP_BUFFER)
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_SYCL
+    if (eng.get_kind() == dnnl::engine::kind::cpu) {
+        return dnnl::memory(md, eng);
+    }
+#endif
+
+#if defined(TEST_DNNL_OCL_USM)
+    return dnnl::ocl_interop::make_memory(
+            md, eng, dnnl::ocl_interop::memory_kind::usm, handle);
+#elif defined(TEST_DNNL_DPCPP_BUFFER)
     return dnnl::sycl_interop::make_memory(
             md, eng, dnnl::sycl_interop::memory_kind::buffer, handle);
 #else
@@ -658,22 +700,8 @@ public:
         }
         // Fill with a magic number to catch possible uninitialized access
         mapped_ptr_t<char> ptr(&mem_);
-        memset(ptr, 0xFF, size_);
+        if (ptr) memset(ptr, 0xFF, size_);
     }
-
-#if 0
-    template <typename malloc_t, typename free_t>
-    test_memory(const memory::desc &d, const dnnl::engine &e,
-            const malloc_t &f_malloc, const free_t &f_free) {
-        size_ = d.get_size();
-        data_.reset(static_cast<char *>(f_malloc(size_)), f_free);
-        mem_ = test::make_memory(d, e, data_.get());
-
-        // Fill with a magic number to catch possible uninitialized access
-        mapped_ptr_t<char> ptr(&mem_);
-        memset(ptr, 0xFF, size_);
-    }
-#endif
 
     size_t get_size() const { return size_; }
     const memory &get() const { return mem_; }
@@ -966,6 +994,13 @@ inline dnnl::stream make_stream(dnnl::engine engine,
                 engine, dnnl::testing::get_threadpool());
 #endif
     return dnnl::stream(engine, flags);
+}
+
+inline int get_primitive_cache_size() {
+    int result = 0;
+    auto status = dnnl::impl::get_primitive_cache_size(&result);
+    if (status != dnnl::impl::status::success) return -1;
+    return result;
 }
 
 #endif

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -40,31 +40,25 @@ namespace ocl {
 // 1. GPU reorder
 // 2. GPU -> CPU copying
 struct cross_engine_reorder_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public reorder_pd_t {
         using reorder_pd_t::reorder_pd_t;
 
-        pd_t(const pd_t &rhs)
-            : reorder_pd_t(rhs)
-            , reorder_pd_(rhs.do_reorder_ ? rhs.reorder_pd_->clone() : nullptr)
-            , reorder_engine_kind_(rhs.reorder_engine_kind_)
-            , do_reorder_(rhs.do_reorder_) {}
+        pd_t(const pd_t &rhs) = default;
 
         DECLARE_COMMON_PD_T("ocl:cross_engine::any", cross_engine_reorder_t);
-
-        DECLARE_GPU_REORDER_CREATE();
 
         status_t init(
                 engine_t *engine, engine_t *src_engine, engine_t *dst_engine);
 
-        std::unique_ptr<primitive_desc_t> reorder_pd_;
+        std::shared_ptr<primitive_desc_t> reorder_pd_;
         engine_kind_t reorder_engine_kind_ = engine_kind::gpu;
         bool do_reorder_ = true;
 
     private:
         void init_scratchpad();
+        DECLARE_GPU_REORDER_CREATE();
     };
-
-    cross_engine_reorder_t(const pd_t *apd) : gpu_primitive_t(apd) {}
 
     status_t init(engine_t *engine) override {
         if (!pd()->do_reorder_) return status::success;

@@ -19,6 +19,8 @@
 
 #include <memory>
 
+#include <CL/sycl/backend/opencl.hpp>
+
 #include "common/c_types_map.hpp"
 #include "common/engine.hpp"
 #include "common/memory_storage.hpp"
@@ -29,6 +31,10 @@
 #include "gpu/ocl/ocl_utils.hpp"
 #include "sycl/sycl_interop_gpu_kernel.hpp"
 #include "sycl/sycl_utils.hpp"
+
+#ifdef DNNL_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
+#include "sycl/sycl_engine_id.hpp"
+#endif
 
 #include <CL/sycl.hpp>
 
@@ -42,7 +48,8 @@ public:
             const cl::sycl::context &ctx, size_t index)
         : gpu::compute::compute_engine_t(kind, runtime_kind::sycl, index)
         , device_(dev)
-        , context_(ctx) {}
+        , context_(ctx)
+        , backend_(backend_t::unknown) {}
 
     status_t init() override {
         backend_ = get_sycl_backend(device_);
@@ -68,7 +75,8 @@ public:
             return status::invalid_arguments;
         }
 
-        std::unique_ptr<gpu::ocl::ocl_gpu_engine_t> ocl_engine;
+        std::unique_ptr<gpu::ocl::ocl_gpu_engine_t, engine_deleter_t>
+                ocl_engine;
         auto status = create_ocl_engine(&ocl_engine);
         if (status != status::success) return status;
 
@@ -78,6 +86,9 @@ public:
 
         gpu::ocl::ocl_wrapper_t<cl_kernel> ocl_kernel = jitter.get_kernel(
                 ocl_engine->context(), ocl_engine->device());
+
+        gpu::ocl::dump_kernel_binary(ocl_kernel.get());
+
         std::vector<gpu::compute::scalar_type_t> arg_types;
         CHECK(get_kernel_arg_types(ocl_kernel, &arg_types));
 
@@ -96,7 +107,8 @@ public:
             return status::invalid_arguments;
         }
 
-        std::unique_ptr<gpu::ocl::ocl_gpu_engine_t> ocl_engine;
+        std::unique_ptr<gpu::ocl::ocl_gpu_engine_t, engine_deleter_t>
+                ocl_engine;
         auto status = create_ocl_engine(&ocl_engine);
         if (status != status::success) return status;
 
@@ -141,6 +153,16 @@ public:
 
     std::function<void(void *)> get_program_list_deleter() const override;
 
+#ifdef DNNL_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
+    engine_id_t engine_id() const override {
+        return engine_id_t(new sycl_engine_id_impl_t(
+                device(), context(), kind(), runtime_kind(), index()));
+    }
+
+protected:
+    ~sycl_engine_base_t() override = default;
+#endif
+
 protected:
     status_t init_device_info() override;
 
@@ -151,7 +173,8 @@ private:
     backend_t backend_;
 
     status_t create_ocl_engine(
-            std::unique_ptr<gpu::ocl::ocl_gpu_engine_t> *ocl_engine) const {
+            std::unique_ptr<gpu::ocl::ocl_gpu_engine_t, engine_deleter_t>
+                    *ocl_engine) const {
         gpu::ocl::ocl_engine_factory_t f(engine_kind::gpu);
 
         if (backend_ == backend_t::opencl) {

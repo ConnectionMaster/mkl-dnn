@@ -53,6 +53,15 @@ struct dims_t : public std::vector<int64_t> {
     }
 };
 
+// strides for SRC, WEI, and DST
+using strides_t = std::vector<dims_t>;
+enum {
+    STRIDES_SRC = 0,
+    STRIDES_WEI = 1,
+    STRIDES_DST = 2,
+    STRIDES_SIZE = 3,
+};
+
 enum dir_t {
     DIR_UNDEF = 0,
     FLAG_DAT = 1,
@@ -89,7 +98,21 @@ std::ostream &operator<<(std::ostream &s, const std::vector<T> &v) {
 }
 
 typedef int data_kind_t;
-enum { SRC = 0, WEI, BIA, DST, ACC, DATA, MEAN, VAR, SS, GWEI, DAT_TOTAL };
+enum {
+    SRC = 0,
+    WEI,
+    BIA,
+    DST,
+    ACC,
+    DATA,
+    MEAN,
+    VAR,
+    SS,
+    SC,
+    SH,
+    GWEI,
+    DAT_TOTAL
+};
 const char *data_kind2str(data_kind_t kind);
 
 struct attr_t {
@@ -101,6 +124,8 @@ struct attr_t {
         PER_DIM_0, // ... dims[0] point.
         PER_DIM_1, // ... dims[1] point.
         PER_DIM_01, // ... unique combination of dims[0] and dims[1] points.
+        PER_MB_SPATIAL, // ... combination of dims[0], dims[2], dims[3] points.
+        PER_SPATIAL, // ... combination of dims[2] and dims[3] points.
         PER_TENSOR, // ... point in the tensor.
         POLICY_TOTAL // guard
     };
@@ -176,9 +201,7 @@ struct attr_t {
     };
 
     struct arg_scales_t {
-        void set(int arg, scale_t scale) {
-            scales.insert(std::make_pair(arg, scale));
-        }
+        void set(int arg, scale_t scale) { scales[arg] = scale; }
 
         scale_t get(int arg) const {
             const auto &s = scales.find(arg);
@@ -214,6 +237,7 @@ struct attr_t {
             EXP_DST,
             GELU_ERF,
             GELU_TANH,
+            HARDSWISH,
             LINEAR,
             LOG,
             LOGISTIC,
@@ -236,9 +260,15 @@ struct attr_t {
             BINARY_START, // a guard to check kind is binary
             ADD,
             DIV,
+            EQ,
+            GE,
+            GT,
+            LE,
+            LT,
             MAX,
             MIN,
             MUL,
+            NE,
             SUB,
             BINARY_END, // a guard to check kind is binary
             // guard entry
@@ -251,45 +281,39 @@ struct attr_t {
         struct entry_t {
             entry_t(kind_t akind) : kind(akind) {
                 if (is_sum_kind()) {
-                    sum.scale = 1.f;
-                    sum.dt = dnnl_data_type_undef;
                 } else if (is_eltwise_kind()) {
                     eltwise.alg = kind2dnnl_kind(kind);
-                    eltwise.alpha = 0.f;
-                    eltwise.beta = 0.f;
-                    eltwise.scale = 1.f;
                 } else if (is_convolution_kind()) {
                     convolution.stride = kind == DW_K3S1P1 ? 1 : 2;
-                    convolution.dst_dt = dnnl_f32;
                     convolution.oscale = scale_t();
                 } else if (is_binary_kind()) {
                     binary.alg = kind2dnnl_kind(kind);
-                    binary.src1_dt = dnnl_data_type_undef;
-                    binary.policy = policy_t::COMMON;
                 }
             }
 
             kind_t kind;
-            union {
-                struct {
-                    float scale;
-                    dnnl_data_type_t dt;
-                } sum;
-                struct {
-                    dnnl_alg_kind_t alg;
-                    float alpha, beta, scale;
-                } eltwise;
-                struct {
-                    int stride;
-                    dnnl_data_type_t dst_dt;
-                    scale_t oscale;
-                } convolution;
-                struct {
-                    dnnl_alg_kind_t alg;
-                    dnnl_data_type_t src1_dt;
-                    policy_t policy;
-                } binary;
-            };
+            struct {
+                float scale = 1.f;
+                int32_t zero_point = 0;
+                dnnl_data_type_t dt = dnnl_data_type_undef;
+            } sum;
+            struct {
+                dnnl_alg_kind_t alg = dnnl_alg_kind_undef;
+                float alpha = 0.f;
+                float beta = 0.f;
+                float scale = 1.f;
+            } eltwise;
+            struct {
+                int stride = 0;
+                dnnl_data_type_t dst_dt = dnnl_f32;
+                scale_t oscale;
+            } convolution;
+            struct {
+                dnnl_alg_kind_t alg = dnnl_alg_kind_undef;
+                dnnl_data_type_t src1_dt = dnnl_data_type_undef;
+                policy_t policy = policy_t::COMMON;
+                std::string tag = tag::any;
+            } binary;
 
             bool is_sum_kind() const;
             bool is_convolution_kind() const;
@@ -460,28 +484,6 @@ private:
     std::map<int, entry_t> entries;
     std::map<int, dnnl_memory_desc_t> mds;
     dw_t dw_entry; // only single dw fusion is supported
-};
-
-struct engine_t {
-    engine_t(dnnl_engine_kind_t engine_kind);
-    engine_t(dnnl_engine_t engine);
-    ~engine_t();
-    operator dnnl_engine_t() const { return engine_; }
-
-private:
-    BENCHDNN_DISALLOW_COPY_AND_ASSIGN(engine_t);
-    dnnl_engine_t engine_;
-    bool is_owner_;
-};
-
-struct stream_t {
-    stream_t(dnnl_engine_t engine);
-    ~stream_t();
-    operator dnnl_stream_t() const { return stream_; }
-
-private:
-    BENCHDNN_DISALLOW_COPY_AND_ASSIGN(stream_t);
-    dnnl_stream_t stream_;
 };
 
 std::ostream &dump_global_params(std::ostream &s);

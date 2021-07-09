@@ -33,6 +33,7 @@ namespace gpu {
 namespace ocl {
 
 struct gen9_binary_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_binary_pd_t {
         using gpu_binary_pd_t::gpu_binary_pd_t;
 
@@ -73,7 +74,8 @@ struct gen9_binary_t : public gpu_primitive_t {
                                             compute::device_ext_t::
                                                     intel_subgroups_short))
                     && post_ops_with_binary_ok(
-                            attr(), dst_md()->data_type, MAX_NDIMS);
+                            attr(), dst_md()->data_type, MAX_NDIMS)
+                    && attr_.set_default_formats(dst_md(0)) == status::success;
 
             if (!ok) return status::unimplemented;
 
@@ -95,8 +97,6 @@ struct gen9_binary_t : public gpu_primitive_t {
         binary_conf_t conf;
     };
 
-    gen9_binary_t(const pd_t *apd) : gpu_primitive_t(apd) {}
-
     status_t init(engine_t *engine) override {
         compute::kernel_ctx_t kernel_ctx;
 
@@ -111,12 +111,9 @@ struct gen9_binary_t : public gpu_primitive_t {
 
     status_t execute(const exec_ctx_t &ctx) const override {
 
-        status_t status = status::success;
-
         auto &src0 = CTX_IN_STORAGE(DNNL_ARG_SRC_0);
         auto &src1 = CTX_IN_STORAGE(DNNL_ARG_SRC_1);
-        auto &dst = CTX_OUT_CLEAN_STORAGE(DNNL_ARG_DST, status);
-        CHECK(status);
+        auto &dst = CTX_OUT_STORAGE(DNNL_ARG_DST);
 
         const auto &conf = pd()->conf;
 
@@ -129,15 +126,14 @@ struct gen9_binary_t : public gpu_primitive_t {
         arg_list.set(2, dst);
 
         unsigned arg_idx = append_post_ops_to_arg_list(
-                ctx, arg_list, 3, conf.attr_info.all_post_ops);
+                ctx, arg_list, 3, pd()->attr()->post_ops_);
 
         arg_list.set(arg_idx++, src0_scale);
         arg_list.set(arg_idx, src1_scale);
 
         auto nd_range = conf.dispatch.nd_range();
 
-        status = parallel_for(ctx, nd_range, kernel_, arg_list);
-        return status;
+        return parallel_for(ctx, nd_range, kernel_, arg_list);
     }
 
 private:

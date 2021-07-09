@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -247,6 +248,10 @@ inline R array_min(const T *arr, size_t size) {
     return min;
 }
 
+inline bool equal_with_nan(float v1, float v2) {
+    return (v1 == v2) || (std::isnan(v1) && std::isnan(v2));
+}
+
 /* Sorts an array of @p vals using @p comparator. Uses @p vals_2nd_level as a
  * second level comparing criteria in case comparator returns 0 (equal values)
  * for @p vals elements.
@@ -412,26 +417,31 @@ struct array_offset_calculator {
     array_offset_calculator(Telem *base, Targs... Fargs) : _dims {Fargs...} {
         _base_ptr = base;
     }
+
     template <typename... Targs>
-    inline Telem &operator()(Targs... Fargs) {
+    array_offset_calculator(std::nullptr_t, Targs... Fargs) = delete;
+
+    template <typename... Targs>
+    inline Telem &operator()(Targs... Fargs) const {
+        assert(static_cast<bool>(_base_ptr));
         return *(_base_ptr + _offset(1, Fargs...));
     }
 
 private:
     template <typename... Targs>
-    inline size_t _offset(size_t const dimension, size_t element) {
+    inline size_t _offset(size_t const dimension, size_t element) const {
         return element;
     }
 
     template <typename... Targs>
     inline size_t _offset(
-            size_t const dimension, size_t theta, size_t element) {
+            size_t const dimension, size_t theta, size_t element) const {
         return element + (_dims[dimension] * theta);
     }
 
     template <typename... Targs>
     inline size_t _offset(size_t const dimension, size_t theta, size_t element,
-            Targs... Fargs) {
+            Targs... Fargs) const {
         size_t t_prime = element + (_dims[dimension] * theta);
         return _offset(dimension + 1, t_prime, Fargs...);
     }
@@ -587,6 +597,10 @@ static size_t hash_combine(size_t seed, const T &v) {
     return seed ^= std::hash<T> {}(v) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
 }
 
+inline int float2int(float x) {
+    return utils::bit_cast<int>(x);
+}
+
 // XXX: Currently SYCL doesn't provide an API to get device UUID but
 // we need to be able to distinguish OpenCL device from Level0 device.
 // As a temporary solution the compound ID will be used for that.
@@ -620,41 +634,36 @@ struct device_id_hash_t {
 // get() method also has a 'soft' mode when the setting is not locked for
 // re-setting. This is used for testing purposes.
 template <typename T>
-struct set_before_first_get_setting_t {
+struct set_once_before_first_get_setting_t {
 private:
     T value_;
-    bool initialized_;
     std::atomic<unsigned> state_;
-    enum : unsigned { idle = 0, busy_setting = 1, locked_after_a_get = 2 };
+    enum : unsigned { idle = 0, busy_setting = 1, locked = 2 };
 
 public:
-    set_before_first_get_setting_t(T init = T(0))
-        : value_ {init}, initialized_ {false}, state_ {0} {}
+    set_once_before_first_get_setting_t(T init)
+        : value_ {init}, state_ {idle} {}
 
     bool set(T new_value) {
-        if (state_.load() == locked_after_a_get) return false;
+        if (state_.load() == locked) return false;
 
         while (true) {
             unsigned expected = idle;
             if (state_.compare_exchange_weak(expected, busy_setting)) break;
-            if (expected == locked_after_a_get) return false;
+            if (expected == locked) return false;
         }
 
         value_ = new_value;
-        initialized_ = true;
-        state_.store(idle);
+        state_.store(locked);
         return true;
     }
 
-    bool initialized() { return initialized_; }
-
     T get(bool soft = false) {
-        if (!soft && state_.load() != locked_after_a_get) {
+        if (!soft && state_.load() != locked) {
             while (true) {
                 unsigned expected = idle;
-                if (state_.compare_exchange_weak(expected, locked_after_a_get))
-                    break;
-                if (expected == locked_after_a_get) break;
+                if (state_.compare_exchange_weak(expected, locked)) break;
+                if (expected == locked) break;
             }
         }
         return value_;

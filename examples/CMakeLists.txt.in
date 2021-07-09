@@ -1,5 +1,5 @@
 #===============================================================================
-# Copyright 2019-2020 Intel Corporation
+# Copyright 2019-2021 Intel Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
 # limitations under the License.
 #===============================================================================
 
-cmake_minimum_required(VERSION 2.8.11)
+cmake_minimum_required(VERSION 2.8.12)
 
 if("${CMAKE_BUILD_TYPE}" STREQUAL "")
     message(STATUS "CMAKE_BUILD_TYPE is unset, defaulting to Release")
@@ -48,10 +48,20 @@ include_directories(${DNNLROOT}/examples)
 
 enable_testing()
 
+if(DNNL_CPU_RUNTIME MATCHES "(SYCL|DPCPP)" OR DNNL_GPU_RUNTIME MATCHES "(SYCL|DPCPP)")
+    set(DNNL_WITH_SYCL true)
+else()
+    set(DNNL_WITH_SYCL false)
+endif()
+
 if(UNIX OR MINGW)
     find_library(LIBM m)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -std=c99")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+
+    if(NOT DNNL_WITH_SYCL)
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -std=c++11")
+    endif()
+
     if(NOT APPLE)
         set(CMAKE_EXE_LINKER_FLAGS "-Wl,--as-needed")
     endif()
@@ -84,12 +94,23 @@ else()
 endif()
 
 if(WIN32 AND DNNL_WITH_SYCL)
-    # Ignore warning LNK4078: multiple '__CLANG_OFFLOAD_BUNDLE__sycl-spi'
-    # sections found with different attributes
-    append(CMAKE_EXE_LINKER_FLAGS "-Xlinker /IGNORE:4078")
+    # XXX: compiler always pulls in release C++ runtime by default, until
+    # this is fixed we have to explicitly drop release C++ runtime for
+    # debug build types.
+    string(TOUPPER "${CMAKE_BUILD_TYPE}" UPPERCASE_CMAKE_BUILD_TYPE)
+    if(UPPERCASE_CMAKE_BUILD_TYPE STREQUAL "DEBUG")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Xlinker /NODEFAULTLIB:msvcrt")
+    endif()
 endif()
 
-find_package(dnnl @PROJECT_VERSION@ CONFIG REQUIRED HINTS ${DNNLROOT})
+# DNNL_CONFIGURATION is only used by oneAPI CMake config and ignored otherwise.
+get_filename_component(DNNL_CONFIGURATION "${DNNLROOT}" ABSOLUTE)
+get_filename_component(DNNL_CONFIGURATION "${DNNL_CONFIGURATION}" NAME)
+# The hint can be used to find CMake config in oneAPI directory layout.
+set(ONEAPI_CMAKE_CONFIG_HINT "../..")
+
+find_package(@LIB_NAME@ @PROJECT_VERSION@ CONFIG REQUIRED HINTS ${DNNLROOT} ${ONEAPI_CMAKE_CONFIG_HINT})
+
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${DNNL_COMPILE_FLAGS}")
 
 if(WIN32)
@@ -123,7 +144,8 @@ endfunction()
 #   test -- "test" to mark executable as a test, "" otherwise
 function(register_example name srcs test)
     add_executable(${name} ${srcs})
-    target_link_libraries(${name} DNNL::dnnl ${LIBM})
+    string(TOUPPER "@LIB_NAME@" LIB_NAMESPACE)
+    target_link_libraries(${name} ${LIB_NAMESPACE}::@LIB_NAME@ ${LIBM})
     if("x${test}" STREQUAL "xtest")
         add_test(${name} ${name})
         maybe_configure_test("${example_name}" TEST)

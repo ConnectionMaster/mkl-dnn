@@ -258,8 +258,9 @@
 #endif // SCALE_QUANT
 
 KERNEL_ATTR
-__kernel void simple_reorder(__global SRC_DATA_T *src, __global DST_DATA_T *dst,
-        float alpha, float beta, __global float *scales) {
+__kernel void simple_reorder(__global SRC_DATA_T *restrict src,
+        __global DST_DATA_T *restrict dst, float alpha, float beta,
+        __global float *restrict scales) {
 
     src += SRC_OFFSET0;
     dst += DST_OFFSET0;
@@ -308,6 +309,31 @@ __kernel void simple_reorder(__global SRC_DATA_T *src, __global DST_DATA_T *dst,
             }
         }
     }
+
+#elif ALT_OFFSETS
+    // This implementation uses two main features:
+    // 1. Extremely simple offset calculations. It works on 2D-4D tensors with
+    // plain format. Coordinates of up to 3 dimensions are passed unmodified
+    // through get_global_id(). 4th dimension, if there is one, is passed as
+    // block size.
+    // 2. Uses work group size at least 8. If that would mean using nonuniform
+    // work groups, number of work items will be padded to keep them uniform.
+    const int d0 = get_global_id(0);
+    const int d1 = get_global_id(1);
+    const int d2 = get_global_id(2);
+#ifdef LIMIT_MAX_D0
+    // padding for uniform work groups, don't write there
+    if (d0 >= LIMIT_MAX_D0) { return; }
+#endif
+    const int src_base = S0 * d0 + S1 * d1 + S2 * d2;
+    const int dst_base = D0 * d0 + D1 * d1 + D2 * d2;
+
+    for (int db = 0; db < BLK; ++db) {
+        const int src_off = src_base + db * SB;
+        const int dst_off = dst_base + db * DB;
+        REORDER(dst[dst_off], src[src_off], alpha, beta);
+    }
+
 #elif PLAIN_xFxE_TO_ABCDEF
     const int d0 = GWS_GET_D0();
     const int d1 = GWS_GET_D1();
@@ -364,18 +390,27 @@ __kernel void simple_reorder(__global SRC_DATA_T *src, __global DST_DATA_T *dst,
 
     REORDER_BLOCK(block_size, src_mem, src_all, d5);
 
-#elif TRANSPOSE_NXN
-    // Fast reorder that uses intel_sub_group_read/write functions
-    // to guarantee good memory bandwidth. Supports many layouts,
-    // see details in simple_reorder.cpp
+#elif TRANSPOSE_NXN || LOCAL_NXN
+    // Fast reorder in which a subgroup of N work items loads N disjoint sets
+    // of N sequential addresses, transposes the NxN matrix and writes it back
+    // as N sets of N addresses. N = 8 or 16. Sets are strided in src by the
+    // dimansion that'll be last in dst and strided in dst by dimension that
+    // was last in src.
+    // One version uses intel_sub_group_read/write functions to perform
+    // the transposition. It needs no auxiliary mem accesses, but uses a lot
+    // of private registers.
+    // The other version uses local memory to performs transposition. It
+    // would be slower but uses few private registers, so it's actually faster
+    // on Gen9 architecture where private data would otherwise spill over to
+    // global mem.
     //
-    // Uses subgroup size = N = 8 or 16.
-    // Each subgroup will read N sets of N values. Sets are strided in src by
-    // the dimension that'll be last in dst.
-    // The NxN data piece is shared between subgroup's work items and transposed
-    // Each subgroup will write N sets of N values.
+    // LocalNxN kernel shares local memory across work items. In general that
+    // doesn't work without barriers. Here we take caution to only access
+    // data that was produced by work items in the same *sub*group. Those
+    // are guaranteed to execute simultaneously, so no barriers are needed.
 #define BATCH_SIZE SUB_GROUP_SIZE
     int sgId = get_sub_group_local_id();
+    int sg_off = get_sub_group_id() * SUB_GROUP_SIZE * BATCH_SIZE;
 
     const int d0 = GWS_GET_D0();
     const int d1 = GWS_GET_D1();
@@ -391,8 +426,12 @@ __kernel void simple_reorder(__global SRC_DATA_T *src, __global DST_DATA_T *dst,
     const int d4_block = GWS_GET_D4_BLOCK();
     const int d5_block = GWS_GET_D5_BLOCK();
 
+#ifdef TRANSPOSE_NXN
     SRC_DATA_T src_buf[SUB_GROUP_SIZE];
     SRC_DATA_T dst_buf[SUB_GROUP_SIZE];
+#else
+    __local SRC_DATA_T tmp[SG_PER_WG * BATCH_SIZE];
+#endif
     SRC_DATA_T send_buf;
 
 #if PAD_FILL_ZERO == 1
@@ -416,9 +455,14 @@ __kernel void simple_reorder(__global SRC_DATA_T *src, __global DST_DATA_T *dst,
             const int iter = d0i + d1i + d2i + d3i + d4i + d5i;
             const int src_off = SRC_OFF(
                     d0 + d0i, d1 + d1i, d2 + d2i, d3 + d3i, d4 + d4i, d5 + d5i);
-
+#ifdef TRANSPOSE_NXN
             src_buf[iter] = SRC_BLOCK_READ(&src[src_off]);
+#else
+            tmp[sg_off + iter * SUB_GROUP_SIZE + sgId]
+                    = SRC_BLOCK_READ(&src[src_off]);
+#endif
         }
+#ifdef TRANSPOSE_NXN
         // Share and transpose. Each work item keeps 1 own value and
         // gets (N-1) values from other work items
         dst_buf[sgId] = src_buf[sgId];
@@ -428,8 +472,8 @@ __kernel void simple_reorder(__global SRC_DATA_T *src, __global DST_DATA_T *dst,
                     = intel_sub_group_shuffle(
                             send_buf, (BATCH_SIZE + sgId - i) % BATCH_SIZE);
         }
+#endif
     }
-
     for_(int d0i = 0; d0i < d0_block; d0i++)
     for_(int d1i = 0; d1i < d1_block; d1i++)
     for_(int d2i = 0; d2i < d2_block; d2i++)
@@ -455,7 +499,15 @@ __kernel void simple_reorder(__global SRC_DATA_T *src, __global DST_DATA_T *dst,
 #if WITH_SUM_AB
             dst_tmp = DST_BLOCK_READ(&dst[dst_off]);
 #endif
+#if SCALE_QUANT
+            alpha = scales[SCALE_OFF(d0, d1, d2, d3, d4, d5)];
+#endif
+#ifdef TRANSPOSE_NXN
             REORDER(dst_tmp, dst_buf[iter], alpha, beta);
+#else
+            send_buf = tmp[sg_off + sgId * SUB_GROUP_SIZE + iter];
+            REORDER(dst_tmp, send_buf, alpha, beta);
+#endif
         } else {
             dst_tmp = 0;
         }
@@ -668,6 +720,150 @@ __kernel void simple_reorder(__global SRC_DATA_T *src, __global DST_DATA_T *dst,
         DST_BLOCK_WRITE(&dst[dst_off], dst_tmp);
     }
 
+#elif PAD_INNERMOST
+    const int sgId = get_sub_group_local_id();
+    int d[6];
+    int blk[6];
+    int b[6] = {0, 0, 0, 0, 0, 0};
+
+    d[0] = GWS_GET_D0();
+    d[1] = GWS_GET_D1();
+    d[2] = GWS_GET_D2();
+    d[3] = GWS_GET_D3();
+    d[4] = GWS_GET_D4();
+    d[5] = GWS_GET_D5();
+    blk[0] = GWS_GET_D0_BLOCK();
+    blk[1] = GWS_GET_D1_BLOCK();
+    blk[2] = GWS_GET_D2_BLOCK();
+    blk[3] = GWS_GET_D3_BLOCK();
+    blk[4] = GWS_GET_D4_BLOCK();
+    blk[5] = GWS_GET_D5_BLOCK();
+
+    __local SRC_DATA_T cache[SG_PER_WG * GROUP * GROUP * VECT_SIZE];
+
+    // offset to local memory for given subgroup
+    const int sg_off = get_sub_group_id() * VECT_SIZE * (GROUP * GROUP);
+
+    for (int i = 0; i < blk[SRC_LOOP_DIM]; i++) {
+        b[SRC_LOOP_DIM] = i;
+        const int src_off = SRC_OFF(d[0] + b[0], d[1] + b[1], d[2] + b[2],
+                d[3] + b[3], d[4] + b[4], d[5] + b[5]);
+        unroll_for(int j = 0; j < GROUP; j++) {
+            const int coff = sg_off + VECT_SIZE * GROUP * i + VECT_SIZE * j;
+            const int soff = src_off + INNERMOST_SIZE * j;
+#if NON_INNERMOST_PADDING == 1
+            const int pad_d0 = d[0] + b[0] >= SRC_D0;
+            const int pad_d1 = NDIMS > 1 && d[1] + b[1] >= SRC_D1;
+            const int pad_d2 = NDIMS > 2 && d[2] + b[2] >= SRC_D2;
+            const int pad_d3 = NDIMS > 3 && d[3] + b[3] >= SRC_D3;
+            const int pad_d4 = NDIMS > 4 && d[4] + b[4] >= SRC_D4;
+            const int pad_d5 = NDIMS > 5 && d[5] + b[5] >= SRC_D5;
+            if (pad_d0 || pad_d1 || pad_d2 || pad_d3 || pad_d4 || pad_d5) {
+                cache[coff + sgId] = 0;
+                continue;
+            }
+#endif
+            if (sgId < INNERMOST_SIZE) {
+                cache[coff + sgId] = src[soff + sgId];
+            } else {
+                cache[coff + sgId] = 0;
+            }
+        }
+    }
+    b[SRC_LOOP_DIM] = 0;
+    for (int i = 0; i < blk[DST_LOOP_DIM]; i++) {
+        b[DST_LOOP_DIM] = i;
+        const int dst_off = DST_OFF(d[0] + b[0], d[1] + b[1], d[2] + b[2],
+                d[3] + b[3], d[4] + b[4], d[5] + b[5]);
+#if SCALE_QUANT
+        alpha = scales[SCALE_OFF(d[0] + b[0], d[1] + b[1], d[2] + b[2],
+                d[3] + b[3], d[4] + b[4], d[5] + b[5])];
+#endif
+        unroll_for(int j = 0; j < GROUP; j++) {
+            const int coff = sg_off + VECT_SIZE * GROUP * j + VECT_SIZE * i;
+            const int doff = dst_off + VECT_SIZE * j;
+            DST_DATA_T dst_tmp;
+#if WITH_SUM_AB
+            dst_tmp = dst[doff + sgId];
+#endif
+            REORDER(dst_tmp, cache[coff + sgId], alpha, beta);
+            dst[doff + sgId] = dst_tmp;
+        }
+    }
+
+#elif VECTORIZE_GROUPS
+
+    int d[6];
+    int blk[6];
+    int b[6] = {0, 0, 0, 0, 0, 0};
+
+    d[0] = GWS_GET_D0();
+    d[1] = GWS_GET_D1();
+    d[2] = GWS_GET_D2();
+    d[3] = GWS_GET_D3();
+    d[4] = GWS_GET_D4();
+    d[5] = GWS_GET_D5();
+    blk[0] = GWS_GET_D0_BLOCK();
+    blk[1] = GWS_GET_D1_BLOCK();
+    blk[2] = GWS_GET_D2_BLOCK();
+    blk[3] = GWS_GET_D3_BLOCK();
+    blk[4] = GWS_GET_D4_BLOCK();
+    blk[5] = GWS_GET_D5_BLOCK();
+
+    SRC_DATA_T cache[GROUP * GROUP];
+    // there will be blocks on 2 dimensions
+    // order of loops is important: one dim gets adjacent data, the other does not
+    // that order will be inverted in dst's loops
+    // There will be GROUP reads of SIMD{VECT} items, each with
+    // sizeof(SRC_DATA_T) bytes, and they all point to contiguous mem area.
+    // GROUP and VECT must be selected in such way that resulting mem
+    // accesses could be combined into full cache line accesses by mem controller
+    int coeff = (VECT_DIM == SRC_LOOP_DIM ? get_sub_group_size() : 1);
+    for (int i = 0; i < blk[SRC_LOOP_DIM]; i++) {
+        b[SRC_LOOP_DIM] = coeff * i;
+        const int src_off = SRC_OFF(d[0] + b[0], d[1] + b[1], d[2] + b[2],
+                d[3] + b[3], d[4] + b[4], d[5] + b[5]);
+        unroll_for(int j = 0; j < GROUP; j++) {
+            int cidx = GROUP * i + j;
+            int sidx = src_off + get_sub_group_size() * j;
+#if PAD_FILL_ZERO == 1
+            int pad_d0 = d[0] + b[0] >= SRC_D0;
+            int pad_d1 = NDIMS > 1 && d[1] + b[1] >= SRC_D1;
+            int pad_d2 = NDIMS > 2 && d[2] + b[2] >= SRC_D2;
+            int pad_d3 = NDIMS > 3 && d[3] + b[3] >= SRC_D3;
+            int pad_d4 = NDIMS > 4 && d[4] + b[4] >= SRC_D4;
+            int pad_d5 = NDIMS > 5 && d[5] + b[5] >= SRC_D5;
+            if (pad_d0 || pad_d1 || pad_d2 || pad_d3 || pad_d4 || pad_d5) {
+                cache[cidx] = 0;
+                continue;
+            }
+#endif
+            cache[cidx] = SRC_BLOCK_READ(&src[sidx]);
+        }
+    }
+    b[SRC_LOOP_DIM] = 0;
+    coeff = (VECT_DIM == DST_LOOP_DIM ? get_sub_group_size() : 1);
+    for (int i = 0; i < blk[DST_LOOP_DIM]; i++) {
+        b[DST_LOOP_DIM] = coeff * i;
+        const int dst_off = DST_OFF(d[0] + b[0], d[1] + b[1], d[2] + b[2],
+                d[3] + b[3], d[4] + b[4], d[5] + b[5]);
+        unroll_for(int j = 0; j < GROUP; j++) {
+            int cidx = i + j * GROUP;
+            int didx = dst_off + get_sub_group_size() * j;
+            DST_DATA_T dst_tmp;
+#if WITH_SUM_AB
+            dst_tmp = DST_BLOCK_READ(&dst[didx]);
+#endif
+#if SCALE_QUANT
+            alpha = scales[SCALE_OFF(d[0] + b[0], d[1] + b[1], d[2] + b[2],
+                    d[3] + b[3], d[4] + b[4], d[5] + b[5])];
+#endif
+
+            REORDER(dst_tmp, cache[cidx], alpha, beta);
+            DST_BLOCK_WRITE(&dst[didx], dst_tmp);
+        }
+    }
+
 #elif USE_DENSE_VECT
     const int d0_blk_start = GWS_GET_D0();
     const int d0_blk_end = d0_blk_start + (GWS_GET_D0_BLOCK() * 16);
@@ -680,6 +876,82 @@ __kernel void simple_reorder(__global SRC_DATA_T *src, __global DST_DATA_T *dst,
         REORDER8(dst_tmp, src_tmp, alpha, beta);
         DST_BLOCK_WRITE8(&dst[d0], dst_tmp);
     }
+
+// xb -> xab and xb -> xba, where size of dst's innermost dim is less than 16
+#elif XAB_XBA
+    const int sgId = get_sub_group_local_id();
+    const int sgNr = get_sub_group_id();
+    const int wgId
+            = get_group_id(0) + 10 * get_group_id(1) + 100 * get_group_id(2);
+
+    int d[6];
+    int blk[6];
+    int b[6] = {0, 0, 0, 0, 0, 0};
+
+    d[0] = GWS_GET_D0();
+    d[1] = GWS_GET_D1();
+    d[2] = GWS_GET_D2();
+    d[3] = GWS_GET_D3();
+    d[4] = GWS_GET_D4();
+    d[5] = GWS_GET_D5();
+    blk[0] = GWS_GET_D0_BLOCK();
+    blk[1] = GWS_GET_D1_BLOCK();
+    blk[2] = GWS_GET_D2_BLOCK();
+    blk[3] = GWS_GET_D3_BLOCK();
+    blk[4] = GWS_GET_D4_BLOCK();
+    blk[5] = GWS_GET_D5_BLOCK();
+
+    __local SRC_DATA_T tmp[SG_PER_WG * SUB_GROUP_SIZE * BLOCK_SIZE];
+    SRC_DATA_T data;
+    const int sgLs = SUB_GROUP_SIZE * BLOCK_SIZE;
+    const int wg_off = sgNr * sgLs;
+    for (int i = 0; i < blk[SRC_BLK_DIM]; i++) {
+        b[SRC_BLK_DIM] = SRC_OFF_COEFF * i;
+        const int src_off = SRC_OFF(d[0] + b[0], d[1] + b[1], d[2] + b[2],
+                d[3] + b[3], d[4] + b[4], d[5] + b[5]);
+#if PAD_FILL_ZERO == 1
+        const int pad_d0 = d[0] + b[0] >= SRC_D0;
+        const int pad_d1 = NDIMS > 1 && d[1] + b[1] >= SRC_D1;
+        const int pad_d2 = NDIMS > 2 && d[2] + b[2] >= SRC_D2;
+        const int pad_d3 = NDIMS > 3 && d[3] + b[3] >= SRC_D3;
+        const int pad_d4 = NDIMS > 4 && d[4] + b[4] >= SRC_D4;
+        const int pad_d5 = NDIMS > 5 && d[5] + b[5] >= SRC_D5;
+        if (pad_d0 || pad_d1 || pad_d2 || pad_d3 || pad_d4 || pad_d5) {
+            tmp[wg_off + SUB_GROUP_SIZE * i + sgId] = 0;
+            continue;
+        }
+#endif
+        data = src[src_off + sgId];
+        tmp[wg_off + SUB_GROUP_SIZE * i + sgId] = data;
+    }
+    b[SRC_BLK_DIM] = 0;
+
+    for (int i = 0; i < blk[SRC_BLK_DIM]; i++) {
+        b[DST_BLK_DIM] = DST_OFF_COEFF * i;
+        const int dst_off = DST_OFF(d[0] + b[0], d[1] + b[1], d[2] + b[2],
+                d[3] + b[3], d[4] + b[4], d[5] + b[5]);
+#if XB_TO_XAB
+        SRC_DATA_T data = tmp[wg_off + (sgId % (SUB_GROUP_SIZE / BLOCK_SIZE))
+                + (sgId / (SUB_GROUP_SIZE / BLOCK_SIZE)) * SUB_GROUP_SIZE
+                + (SUB_GROUP_SIZE / BLOCK_SIZE) * i];
+#else // XB_TO_XBA
+        SRC_DATA_T data = tmp[wg_off + (sgId % BLOCK_SIZE) * SUB_GROUP_SIZE
+                + sgId / BLOCK_SIZE + (SUB_GROUP_SIZE / BLOCK_SIZE) * i];
+#endif
+
+#if SCALE_QUANT
+        alpha = scales[SCALE_OFF(d[0] + b[0], d[1] + b[1], d[2] + b[2],
+                d[3] + b[3], d[4] + b[4], d[5] + b[5])];
+#endif
+        DST_DATA_T dst_tmp;
+#if WITH_SUM_AB
+        dst_tmp = dst[dst_off + sgId];
+#endif
+        REORDER(dst_tmp, data, alpha, beta);
+        dst[dst_off + sgId] = dst_tmp;
+    }
+
+//###################################################################################
 #else // unroll_* kernels start here
 
     const int d0 = GWS_GET_D0();

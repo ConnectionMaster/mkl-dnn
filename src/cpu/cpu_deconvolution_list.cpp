@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@
 #include "cpu/ref_deconvolution.hpp"
 
 #if DNNL_X64
+#include "cpu/x64/jit_avx512_core_amx_int8_deconvolution.hpp"
 #include "cpu/x64/jit_avx512_core_x8s8s32x_1x1_deconvolution.hpp"
 #include "cpu/x64/jit_avx512_core_x8s8s32x_deconvolution.hpp"
 #include "cpu/x64/jit_uni_x8s8s32x_1x1_deconvolution.hpp"
@@ -30,13 +31,12 @@ namespace dnnl {
 namespace impl {
 namespace cpu {
 
-using pd_create_f = engine_t::primitive_desc_create_f;
-
 namespace {
 using namespace dnnl::impl::data_type;
 
 // clang-format off
-const pd_create_f impl_list[] = {
+const impl_list_item_t impl_list[] = {
+        CPU_INSTANCE_X64(jit_avx512_core_amx_int8_deconvolution_fwd_t)
         CPU_INSTANCE_X64(jit_avx512_core_x8s8s32x_1x1_deconvolution_fwd_t<u8, f32>)
         CPU_INSTANCE_X64(jit_avx512_core_x8s8s32x_1x1_deconvolution_fwd_t<u8, s32>)
         CPU_INSTANCE_X64(jit_avx512_core_x8s8s32x_1x1_deconvolution_fwd_t<u8, u8>)
@@ -94,7 +94,7 @@ const pd_create_f impl_list[] = {
 // clang-format on
 } // namespace
 
-const pd_create_f *get_deconvolution_impl_list(
+const impl_list_item_t *get_deconvolution_impl_list(
         const deconvolution_desc_t *desc) {
     UNUSED(desc);
     return impl_list;

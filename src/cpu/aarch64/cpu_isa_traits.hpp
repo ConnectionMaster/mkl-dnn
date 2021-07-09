@@ -29,8 +29,8 @@
  * be obtained with mmap */
 #define XBYAK_USE_MMAP_ALLOCATOR
 
-#include "cpu/aarch64/xbyak_aarch64/xbyak_aarch64.h"
-#include "cpu/aarch64/xbyak_aarch64/xbyak_aarch64_util.h"
+#include "cpu/aarch64/xbyak_aarch64/xbyak_aarch64/xbyak_aarch64.h"
+#include "cpu/aarch64/xbyak_aarch64/xbyak_aarch64/xbyak_aarch64_util.h"
 
 namespace dnnl {
 namespace impl {
@@ -77,6 +77,7 @@ enum cpu_isa_t : unsigned {
 
 const char *get_isa_info();
 
+cpu_isa_t get_max_cpu_isa();
 cpu_isa_t DNNL_API get_max_cpu_isa_mask(bool soft = false);
 status_t set_max_cpu_isa(dnnl_cpu_isa_t isa);
 dnnl_cpu_isa_t get_effective_cpu_isa();
@@ -134,10 +135,7 @@ static inline bool mayiuse(const cpu_isa_t cpu_isa, bool soft = false) {
     if ((cpu_isa_mask & cpu_isa) != cpu_isa) return false;
 
     switch (cpu_isa) {
-        case asimd:
-            /* Advanced SIMD and floating-point instructions are
-         mondatory for AArch64. */
-            return true;
+        case asimd: return cpu().has(Cpu::tADVSIMD);
         case sve_128:
             return cpu().has(Cpu::tSVE) && cpu().getSveLen() == SVE_128;
         case sve_256:
@@ -150,6 +148,10 @@ static inline bool mayiuse(const cpu_isa_t cpu_isa, bool soft = false) {
         case isa_all: return false;
     }
     return false;
+}
+
+static inline uint64_t get_sve_length() {
+    return cpu().getSveLen();
 }
 
 static inline bool mayiuse_atomic() {

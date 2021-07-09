@@ -18,6 +18,7 @@
 
 #include "common/math_utils.hpp"
 
+#include "cpu/platform.hpp"
 #include "cpu/primitive_attr_postops.hpp"
 #include "cpu/simple_q10n.hpp"
 
@@ -36,21 +37,25 @@ namespace inner_product_utils {
 template <data_type_t acc_type, data_type_t dst_type>
 struct ref_pp_kernel_t : public pp_kernel_t<acc_type, dst_type> {
     ref_pp_kernel_t(size_t OC, size_t MB, dim_t dst_mb_stride,
-            const primitive_attr_t *attr, data_type_t bias_dt, bool skip_sum)
+            const primitive_attr_t *attr, data_type_t bias_dt,
+            const int dst_ndims, bool skip_sum)
         : pp_kernel_t<acc_type, dst_type>(
-                OC, MB, dst_mb_stride, attr, bias_dt, skip_sum) {
-        if (this->do_eltwise_ || this->do_binary_)
-            ref_post_ops_.reset(new ref_post_ops_t(this->post_ops_));
-    }
+                OC, MB, dst_mb_stride, attr, bias_dt, dst_ndims, skip_sum)
+        , ref_post_ops_(this->do_sum_ || this->do_eltwise_ || this->do_binary_
+                          ? utils::make_unique<ref_post_ops_t>(
+                                  this->post_ops_, skip_sum)
+                          : nullptr) {}
 
     using acc_data_t = typename prec_traits<acc_type>::type;
     using dst_data_t = typename prec_traits<dst_type>::type;
 
     void operator()(dst_data_t *dst, const acc_data_t *acc, const char *bias,
-            const float *scales, size_t start, size_t end, size_t runtime_oc,
-            dim_t dst_mb_stride, const float *dst_zero_points,
+            const float *scales, size_t start, size_t dst_logical_offs,
+            size_t dim1_off, size_t end, size_t runtime_oc, dim_t dst_mb_stride,
+            const float *dst_zero_points,
             const void *post_ops_binary_rhs_arg_vec, const void *dst_orig,
-            const exec_ctx_t &ctx, const memory_desc_t &dst_md) const override;
+            size_t first_mb_matrix_addr_off, const exec_ctx_t &ctx,
+            const memory_desc_t &dst_md) const override;
 
 private:
     std::unique_ptr<ref_post_ops_t> ref_post_ops_;
@@ -59,11 +64,11 @@ private:
 template <data_type_t acc_type, data_type_t dst_type>
 void ref_pp_kernel_t<acc_type, dst_type>::operator()(dst_data_t *dst,
         const acc_data_t *acc, const char *bias, const float *scales,
-        size_t start, size_t end, size_t runtime_oc, dim_t dst_mb_stride,
-        const float *dst_zero_points,
+        size_t start, size_t dst_logical_off, size_t dim1_off, size_t end,
+        size_t runtime_oc, dim_t dst_mb_stride, const float *dst_zero_points,
         const void * /* post_ops_binary_rhs_arg_vec */,
-        const void * /* dst_orig */, const exec_ctx_t &ctx,
-        const memory_desc_t &dst_md) const {
+        const void * /* dst_orig */, size_t /* first_mb_matrix_addr_off */,
+        const exec_ctx_t &ctx, const memory_desc_t &dst_md) const {
     using math::get_bias;
 
     if (end <= start) return;
@@ -73,7 +78,8 @@ void ref_pp_kernel_t<acc_type, dst_type>::operator()(dst_data_t *dst,
     ref_post_ops_t::args_t args;
     args.ctx = &ctx;
     args.dst_md = &dst_md;
-
+    const bool apply_postops
+            = this->do_sum_ || this->do_eltwise_ || this->do_binary_;
     auto calculate_dst_value_and_increment_oc
             = [&](const acc_data_t &acc_value, dst_data_t &dst_value,
                       size_t &oc_value, const size_t dst_offset) {
@@ -82,8 +88,8 @@ void ref_pp_kernel_t<acc_type, dst_type>::operator()(dst_data_t *dst,
                       d += get_bias(bias, oc_value, this->bias_data_type_);
                   if (this->do_scale_)
                       d *= scales[oc_value * this->scale_idx_mult_];
-                  if (this->do_sum_) d += this->sum_scale_ * dst_value;
-                  if (this->do_eltwise_ || this->do_binary_) {
+                  if (apply_postops) {
+                      if (this->do_sum_) args.dst_val = dst_value;
                       args.l_offset = dst_offset;
                       ref_post_ops_->execute(d, args);
                   }
@@ -93,30 +99,32 @@ void ref_pp_kernel_t<acc_type, dst_type>::operator()(dst_data_t *dst,
               };
 
     size_t oc = start % OC;
-    dim_t offt = (start / OC) * dst_mb_stride + oc;
+    dim_t src1_bin_po_offt = dst_logical_off;
     if (this->has_trivial_mb_stride()) {
         // keep separate code path to avoid performance degradations
         for (size_t i = start; i < end; i++) {
-            calculate_dst_value_and_increment_oc(acc[i], dst[i], oc, offt);
-            ++offt;
+            calculate_dst_value_and_increment_oc(
+                    acc[i], dst[i], oc, src1_bin_po_offt);
+            ++src1_bin_po_offt;
         }
     } else {
+        const dim_t offt = (start / OC) * dst_mb_stride + oc;
         const bool acc_is_dst = dst == (dst_data_t *)acc;
         dst = dst + offt;
         // if dst and acc point to same address (inplace), then strides
         // must be similar, else assume acc buffer is dense.
         acc = acc + (acc_is_dst ? offt : start);
         while (start < end) {
-            calculate_dst_value_and_increment_oc(*acc, *dst, oc, offt);
+            calculate_dst_value_and_increment_oc(
+                    *acc, *dst, oc, src1_bin_po_offt);
             if (oc == 0) {
                 dst = dst + dst_mb_stride - OC;
-                offt += dst_mb_stride - OC;
                 // if dst and acc point to same address (inplace), then strides
                 // must be similar, else assume acc buffer is dense.
                 if (acc_is_dst) acc = acc + dst_mb_stride - OC;
             }
             ++dst;
-            ++offt;
+            ++src1_bin_po_offt;
             ++acc;
             ++start;
         }
@@ -128,13 +136,18 @@ void ref_pp_kernel_t<acc_type, dst_type>::operator()(dst_data_t *dst,
 template <data_type_t acc_type, data_type_t dst_type>
 pp_kernel_t<acc_type, dst_type>::pp_kernel_t(size_t OC, size_t MB,
         dim_t dst_mb_stride, const primitive_attr_t *attr, data_type_t bias_dt,
-        bool skip_sum)
+        const int dst_ndims, bool skip_sum)
     : OC_(OC)
     , MB_(MB)
     , dst_mb_stride_(dst_mb_stride)
-    , bias_data_type_(bias_dt) {
+    , bias_data_type_(bias_dt)
+    , ndims_(dst_ndims) {
     do_scale_ = !attr->output_scales_.has_default_values();
-    if (do_scale_) scale_idx_mult_ = (attr->output_scales_.mask_ == (1 << 1));
+    if (do_scale_)
+        // PER_OC mask definition for matmul batched case
+        // also valid for ip because dst_ndims == 2
+        scale_idx_mult_
+                = (attr->output_scales_.mask_ == (1 << (dst_ndims - 1)));
 
     post_ops_ = attr->post_ops_;
     const int eltwise_ind = post_ops_.find(primitive_kind::eltwise);
@@ -145,7 +158,10 @@ pp_kernel_t<acc_type, dst_type>::pp_kernel_t(size_t OC, size_t MB,
 
     const int sum_ind = post_ops_.find(primitive_kind::sum);
     do_sum_ = sum_ind != -1 && !skip_sum;
-    if (do_sum_) sum_scale_ = post_ops_.entry_[sum_ind].sum.scale;
+    if (do_sum_) {
+        sum_scale_ = post_ops_.entry_[sum_ind].sum.scale;
+        sum_zp_ = post_ops_.entry_[sum_ind].sum.zero_point;
+    }
 
     if (do_bias())
         bias_data_type_size_ = types::data_type_size(bias_data_type_);
@@ -165,7 +181,7 @@ pp_kernel_t<acc_type, dst_type> *pp_kernel_t<acc_type, dst_type>::create(
 #endif
 
     return new ref_pp_kernel_t<acc_type, dst_type>(
-            OC, MB, dst_mb_stride, attr, bias_dt, skip_sum);
+            OC, MB, dst_mb_stride, attr, bias_dt, dst_md->ndims, skip_sum);
 }
 
 using namespace data_type;
@@ -176,13 +192,31 @@ template struct pp_kernel_t<s32, s8>;
 template struct pp_kernel_t<s32, u8>;
 template struct pp_kernel_t<f32, bf16>;
 
-bool post_ops_ok(const post_ops_t &post_ops, const memory_desc_wrapper *dst_d) {
+bool post_ops_ok(const post_ops_t &post_ops, const memory_desc_wrapper *dst_d,
+        const bcast_set_t &enabled_bcast_strategy) {
 #if DNNL_X64
-    using namespace x64::injector;
-    static constexpr bool sum_at_pos_0_only = true;
-    static constexpr bool sum_requires_scale_one = false;
-    return x64::injector::post_ops_ok({x64::isa_all, {binary, eltwise, sum},
-            post_ops, dst_d, sum_at_pos_0_only, sum_requires_scale_one});
+    static constexpr auto isa_supported
+            = x64::inner_product_utils::jit_pp_kernel_supported_isa();
+    using namespace cpu::x64;
+    if (mayiuse(isa_supported)) {
+        using namespace x64::injector;
+        static constexpr bool sum_at_pos_0_only = true;
+        static constexpr bool sum_requires_scale_one = false;
+        static constexpr bool sum_requires_zp_zero = false;
+
+        const bool is_binary_po_channel_bcast
+                = binary_injector_utils::bcast_strategy_present(
+                        binary_injector_utils::extract_bcast_strategies(
+                                post_ops.entry_, *dst_d),
+                        broadcasting_strategy_t::per_mb_spatial);
+        const bool supported_channel_bcast = IMPLICATION(
+                is_binary_po_channel_bcast, (*dst_d).ndims() == 4);
+        const cpu_isa_t isa = get_max_cpu_isa();
+        return supported_channel_bcast
+                && injector::post_ops_ok({isa, {binary, eltwise, sum}, post_ops,
+                        dst_d, sum_at_pos_0_only, sum_requires_scale_one,
+                        sum_requires_zp_zero, enabled_bcast_strategy});
+    }
 #endif
     for (size_t i = 0; i < post_ops.entry_.size(); i++) {
         const auto &post_op = post_ops.entry_[i];
@@ -195,9 +229,10 @@ bool post_ops_ok(const post_ops_t &post_ops, const memory_desc_wrapper *dst_d) {
     return true;
 }
 
-bool post_ops_ok(const post_ops_t &post_ops, const memory_desc_t *dst_d) {
+bool post_ops_ok(const post_ops_t &post_ops, const memory_desc_t *dst_d,
+        const bcast_set_t &enabled_bcast_strategy) {
     const auto dst_md = memory_desc_wrapper(dst_d);
-    return post_ops_ok(post_ops, &dst_md);
+    return post_ops_ok(post_ops, &dst_md, enabled_bcast_strategy);
 }
 
 } // namespace inner_product_utils

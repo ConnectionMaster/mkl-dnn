@@ -16,6 +16,7 @@
 
 #include "gpu/ocl/cross_engine_reorder.hpp"
 
+#include "common/reorder.hpp"
 #include "common/utils.hpp"
 #include "gpu/ocl/ocl_stream.hpp"
 #include "gpu/ocl/ocl_utils.hpp"
@@ -56,23 +57,15 @@ status_t cross_engine_reorder_t::pd_t::init(
     engine_t *reorder_engine
             = src_engine->kind() == engine_kind::gpu ? src_engine : dst_engine;
 
-    auto r_impls = reorder_engine->get_reorder_implementation_list(
-            src_md(), dst_md());
     primitive_attr_t r_attr(*attr());
     if (!r_attr.is_initialized()) return status::out_of_memory;
-    r_attr.set_scratchpad_mode(scratchpad_mode::user);
-    for (auto r = r_impls; *r; ++r) {
-        reorder_pd_t *r_pd = nullptr;
-        if ((*r)(&r_pd, reorder_engine, &r_attr, reorder_engine, src_md(),
-                    reorder_engine, dst_md())
-                == status::success) {
-            reorder_pd_.reset(r_pd);
-            break;
-        }
-    }
 
-    if (!reorder_pd_) return status::unimplemented;
+    CHECK(reorder_primitive_desc_create(
+            reorder_pd_, reorder_engine, src_md(), dst_md(), &r_attr));
     init_scratchpad();
+
+    reorder_pd_t::init_desc(
+            src_engine->kind(), dst_engine->kind(), true /* is_cross_engine */);
 
     return status::success;
 }
@@ -85,8 +78,7 @@ status_t cross_engine_reorder_t::execute(const exec_ctx_t &ctx) const {
     status_t status = status::success;
 
     auto &src = CTX_IN_STORAGE(DNNL_ARG_FROM);
-    auto &dst = CTX_OUT_CLEAN_STORAGE(DNNL_ARG_TO, status);
-    CHECK(status);
+    auto &dst = CTX_OUT_STORAGE(DNNL_ARG_TO);
 
     std::unique_ptr<memory_t> wspace;
     if (pd()->do_reorder_) {
@@ -97,10 +89,9 @@ status_t cross_engine_reorder_t::execute(const exec_ctx_t &ctx) const {
         auto wspace_md = src_engine_kind == reorder_engine_kind
                 ? pd()->dst_md()
                 : pd()->src_md();
-        auto wspace_ptr = scratchpad->data_handle();
         CHECK(safe_ptr_assign(wspace,
                 new memory_t(ctx.stream()->engine(), wspace_md,
-                        memory_flags_t::use_runtime_ptr, wspace_ptr)));
+                        std::move(scratchpad))));
     }
 
     auto exec_reorder = [&](const memory_t *src_mem, const memory_t *dst_mem) {

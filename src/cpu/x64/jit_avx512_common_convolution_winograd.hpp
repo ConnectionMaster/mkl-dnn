@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -104,20 +104,19 @@ struct jit_avx512_common_convolution_winograd_fwd_t
                     && attr()->has_default_values(
                             primitive_attr_t::skip_mask_t::post_ops,
                             data_type::f32)
-                    && !has_zero_dim_memory() && set_default_formats();
+                    && !has_zero_dim_memory() && set_default_formats()
+                    && attr_.set_default_formats(dst_md(0)) == status::success;
             if (!ok) return status::unimplemented;
 
-            status_t status
-                    = jit_avx512_common_conv_winograd_fwd_kernel_f32::init_conf(
-                            jcp_, *desc(), *src_md(), *weights_md(), *dst_md(),
-                            *attr());
-            if (status != status::success) return status;
+            CHECK(jit_avx512_common_conv_winograd_fwd_kernel_f32::init_conf(
+                    jcp_, *desc(), *src_md(), *weights_md(), *dst_md(),
+                    *attr()));
             set_default_alg_kind(alg_kind::convolution_winograd);
 
             auto scratchpad = scratchpad_registry().registrar();
             winograd_avx512_common::init_scratchpad(scratchpad, jcp_);
 
-            return status;
+            return status::success;
         }
 
         jit_conv_winograd_conf_t jcp_;

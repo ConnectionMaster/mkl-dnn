@@ -33,6 +33,7 @@ namespace gpu {
 namespace ocl {
 
 struct gen9_eltwise_fwd_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_eltwise_fwd_pd_t {
         using gpu_eltwise_fwd_pd_t::gpu_eltwise_fwd_pd_t;
 
@@ -52,9 +53,9 @@ struct gen9_eltwise_fwd_t : public gpu_primitive_t {
                             eltwise_tanh, eltwise_elu, eltwise_square,
                             eltwise_sqrt, eltwise_soft_relu, eltwise_logistic,
                             eltwise_logsigmoid, eltwise_mish, eltwise_exp,
-                            eltwise_gelu_tanh, eltwise_swish, eltwise_log,
-                            eltwise_clip, eltwise_clip_v2, eltwise_pow,
-                            eltwise_gelu_erf, eltwise_round,
+                            eltwise_gelu_tanh, eltwise_hardswish, eltwise_swish,
+                            eltwise_log, eltwise_clip, eltwise_clip_v2,
+                            eltwise_pow, eltwise_gelu_erf, eltwise_round,
                             eltwise_relu_use_dst_for_bwd,
                             eltwise_logistic_use_dst_for_bwd,
                             eltwise_tanh_use_dst_for_bwd,
@@ -82,8 +83,6 @@ struct gen9_eltwise_fwd_t : public gpu_primitive_t {
         offsets_t off;
     };
 
-    gen9_eltwise_fwd_t(const pd_t *apd) : gpu_primitive_t(apd) {}
-
     status_t init(engine_t *engine) override {
         compute::kernel_ctx_t kernel_ctx;
 
@@ -107,6 +106,7 @@ private:
 };
 
 struct gen9_eltwise_bwd_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_eltwise_bwd_pd_t {
         pd_t(const eltwise_desc_t *adesc, const primitive_attr_t *attr,
                 const eltwise_fwd_pd_t *hint_fwd_pd)
@@ -126,9 +126,10 @@ struct gen9_eltwise_bwd_t : public gpu_primitive_t {
                             eltwise_tanh, eltwise_elu, eltwise_square,
                             eltwise_sqrt, eltwise_soft_relu, eltwise_logsigmoid,
                             eltwise_mish, eltwise_logistic, eltwise_exp,
-                            eltwise_gelu_tanh, eltwise_swish, eltwise_log,
-                            eltwise_clip, eltwise_clip_v2, eltwise_pow,
-                            eltwise_gelu_erf, eltwise_relu_use_dst_for_bwd,
+                            eltwise_hardswish, eltwise_gelu_tanh, eltwise_swish,
+                            eltwise_log, eltwise_clip, eltwise_clip_v2,
+                            eltwise_pow, eltwise_gelu_erf,
+                            eltwise_relu_use_dst_for_bwd,
                             eltwise_logistic_use_dst_for_bwd,
                             eltwise_tanh_use_dst_for_bwd,
                             eltwise_elu_use_dst_for_bwd,
@@ -151,8 +152,6 @@ struct gen9_eltwise_bwd_t : public gpu_primitive_t {
         offsets_t off;
         bool use_dense;
     };
-
-    gen9_eltwise_bwd_t(const pd_t *apd) : gpu_primitive_t(apd) {}
 
     status_t init(engine_t *engine) override {
         compute::kernel_ctx_t kernel_ctx;

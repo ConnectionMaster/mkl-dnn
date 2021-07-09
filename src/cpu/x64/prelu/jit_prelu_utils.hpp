@@ -1,6 +1,5 @@
-
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -18,17 +17,18 @@
 #ifndef CPU_X64_PRELU_JIT_PRELU_UTILS_HPP
 #define CPU_X64_PRELU_JIT_PRELU_UTILS_HPP
 
-#include <memory>
+#include <set>
+
 #include "cpu/x64/cpu_isa_traits.hpp"
 #include "cpu/x64/jit_generator.hpp"
 
 namespace dnnl {
 namespace impl {
+
+struct memory_desc_wrapper;
+
 namespace cpu {
 namespace x64 {
-
-struct bf16_emulation_t;
-
 namespace prelu {
 
 enum class bcast {
@@ -42,35 +42,32 @@ enum class bcast {
 bcast get_bcast_type(
         const memory_desc_wrapper &lhs, const memory_desc_wrapper &rhs);
 cpu_isa_t get_supported_isa();
-int get_vlen(const cpu_isa_t &isa) noexcept;
 int get_n_vregs(const cpu_isa_t &isa) noexcept;
+bool dt_supported(const std::set<data_type_t> &tensor_data_types) noexcept;
+bool is_s8u8(const std::set<data_type_t> &tensor_data_types) noexcept;
+int get_simd_w(const std::set<data_type_t> &tensor_data_types) noexcept;
+size_t c_blk_nelems(const memory_desc_t *mem, bool padding) noexcept;
+size_t get_block_tail_size(const memory_desc_t *mem) noexcept;
+void apply_zero_padding(jit_generator *host, const size_t tail_size,
+        const data_type_t dt, const size_t block_tail_size,
+        const Xbyak::Reg64 &reg_dst, const Xbyak::Reg64 *reg_offset) noexcept;
 
 template <typename Vmm>
-class jit_prelu_io_helper {
-public:
-    jit_prelu_io_helper(jit_generator *host, const cpu_isa_t &isa,
-            const data_type_t &data_type, std::size_t tail_size,
-            const Xbyak::Opmask &tail_opmask, const Vmm &tail_vmm_mask,
-            const Xbyak::Reg64 &reg_tmp);
-    ~jit_prelu_io_helper();
-    void prepare_tail_mask();
-    void broadcast(const Xbyak::Address &src_addr, const Vmm &dst_vmm);
-    void load(const Xbyak::Address &src_addr, const Vmm &dst_vmm, bool tail);
-    void store(const Vmm &src_vmm, const Xbyak::Address &dst_addr, bool tail);
+struct vmm_traits_t {};
 
-private:
-    void load_tail(const Xbyak::Address &src_addr, const Vmm &dst_vmm);
-    void store_tail(const Vmm &src_vmm, const Xbyak::Address &dst_addr);
+template <>
+struct vmm_traits_t<Xbyak::Zmm> {
+    static constexpr int vlen = 64;
+};
 
-    jit_generator *host_;
-    const cpu_isa_t isa_;
-    const data_type_t data_type_;
-    const std::size_t tail_size_;
-    const Xbyak::Opmask tail_opmask_;
-    const Vmm tail_vmm_mask_;
-    const Xbyak::Reg64 reg_tmp_;
-    const bool bf16_supported_;
-    const std::unique_ptr<bf16_emulation_t> bf16_emu_;
+template <>
+struct vmm_traits_t<Xbyak::Ymm> {
+    static constexpr int vlen = 32;
+};
+
+template <>
+struct vmm_traits_t<Xbyak::Xmm> {
+    static constexpr int vlen = 16;
 };
 
 } // namespace prelu

@@ -66,7 +66,7 @@ public:
     virtual status_t create_kernels_from_ocl_source(
             std::vector<compute::kernel_t> *kernels,
             const std::vector<const char *> &kernel_names,
-            const char **source_strings,
+            const char *source_string,
             const compute::kernel_ctx_t &kernel_ctx) const {
         assert(!"unexpected");
         return status::success;
@@ -79,16 +79,17 @@ public:
             desc.primitive_kind = primitive_kind::zero_pad;
             dnnl_primitive_desc_iterator it(
                     this, (op_desc_t *)&desc, nullptr, nullptr);
-            ++it;
-            std::unique_ptr<primitive_desc_t> zero_pad_pd(it.fetch_once());
+            std::shared_ptr<primitive_desc_t> zero_pad_pd(*(++it));
             if (zero_pad_pd == nullptr) return;
 
             status_t status
                     = zero_pad_pd->create_primitive(zero_pad_primitive_, this);
+#ifndef DNNL_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
             if (status == status::success) {
                 status = zero_pad_primitive_->create_resource(
                         this, zero_pad_resources_);
             }
+#endif
             if (status != status::success) { zero_pad_primitive_.reset(); }
         });
 
@@ -102,8 +103,8 @@ public:
     bool is_gen9() const {
         return device_info_->gpu_arch() == gpu_arch_t::gen9;
     }
-    bool is_gen12lp() const {
-        return device_info_->gpu_arch() == gpu_arch_t::gen12lp;
+    bool is_xe_lp() const {
+        return device_info_->gpu_arch() == gpu_arch_t::xe_lp;
     }
     bool mayiuse_ngen_kernels() {
         return device_info_->mayiuse_ngen_kernels(this);
@@ -132,10 +133,17 @@ public:
         return status;
     }
 
+    // non-blocking query to check if service stream is already created
+    bool is_service_stream_created() const { return (bool)service_stream_; }
+
     virtual std::function<void(void *)> get_program_list_deleter() const = 0;
 
 protected:
     virtual status_t init_device_info() = 0;
+
+#ifdef DNNL_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
+    ~compute_engine_t() override = default;
+#endif
 
     std::shared_ptr<device_info_t> device_info_;
 

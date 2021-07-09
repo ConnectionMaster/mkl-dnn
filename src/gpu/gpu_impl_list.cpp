@@ -18,15 +18,14 @@
 
 #include "gpu/jit/gemm/gen_gemm.hpp"
 #include "gpu/ocl/convolution_inner_product.hpp"
-#include "gpu/ocl/gemm/gen12lp_gemm.hpp"
+#include "gpu/ocl/gemm/gemm_with_post_ops.hpp"
 #include "gpu/ocl/gemm/gen9_gemm.hpp"
 #include "gpu/ocl/gemm/gen9_gemm_x8x8s32.hpp"
 #include "gpu/ocl/gemm/ref_gemm.hpp"
+#include "gpu/ocl/gemm/xe_lp_gemm.hpp"
 #include "gpu/ocl/gemm_inner_product.hpp"
 #include "gpu/ocl/gemm_matmul.hpp"
 #include "gpu/ocl/gemm_post_ops_inner_product.hpp"
-#include "gpu/ocl/gen12lp_x8s8x_1x1_convolution.hpp"
-#include "gpu/ocl/gen12lp_x8s8x_convolution.hpp"
 #include "gpu/ocl/gen9_batch_normalization.hpp"
 #include "gpu/ocl/gen9_binary.hpp"
 #include "gpu/ocl/gen9_convolution.hpp"
@@ -53,17 +52,20 @@
 #include "gpu/ocl/ref_zero_pad.hpp"
 #include "gpu/ocl/rnn/ref_rnn.hpp"
 #include "gpu/ocl/shuffle_by_reorder.hpp"
+#include "gpu/ocl/xe_lp_x8s8x_1x1_convolution.hpp"
+#include "gpu/ocl/xe_lp_x8s8x_convolution.hpp"
 
 namespace dnnl {
 namespace impl {
 namespace gpu {
 
-using pd_create_f = dnnl::impl::engine_t::primitive_desc_create_f;
-
 namespace {
 
-#define INSTANCE(...) &primitive_desc_t::create<__VA_ARGS__::pd_t>
-const pd_create_f gpu_impl_list[] = {
+#define INSTANCE(...) \
+    impl_list_item_t( \
+            impl_list_item_t::type_deduction_helper_t<__VA_ARGS__::pd_t>())
+
+const impl_list_item_t gpu_impl_list[] = {
         // Elementwise
         INSTANCE(ocl::gen9_eltwise_fwd_t),
         INSTANCE(ocl::gen9_eltwise_bwd_t),
@@ -76,9 +78,9 @@ const pd_create_f gpu_impl_list[] = {
         INSTANCE(ocl::ref_deconvolution_bwd_weights_t),
 
         // Convolution
-        INSTANCE(ocl::gen12lp_x8s8x_1x1_convolution_fwd_t),
-        INSTANCE(ocl::gen12lp_x8s8x_convolution_fwd_t),
-        INSTANCE(ocl::gen12lp_x8s8x_convolution_bwd_data_t),
+        INSTANCE(ocl::xe_lp_x8s8x_1x1_convolution_fwd_t),
+        INSTANCE(ocl::xe_lp_x8s8x_convolution_fwd_t),
+        INSTANCE(ocl::xe_lp_x8s8x_convolution_bwd_data_t),
         INSTANCE(ocl::gen9_wino_convolution_fwd_t),
         INSTANCE(ocl::gen9_convolution_fwd_t),
         INSTANCE(ocl::gen9_convolution_bwd_data_t),
@@ -123,8 +125,9 @@ const pd_create_f gpu_impl_list[] = {
         INSTANCE(ocl::ref_softmax_bwd_t),
 
         // GEMM (internal)
+        INSTANCE(ocl::gemm_with_post_ops_t),
         INSTANCE(jit::gen_gemm_t),
-        INSTANCE(ocl::gen12lp_gemm_t),
+        INSTANCE(ocl::xe_lp_gemm_t),
         INSTANCE(ocl::gen9_gemm_x8x8s32_t),
         INSTANCE(ocl::gen9_gemm_t),
         INSTANCE(ocl::ref_gemm_t),
@@ -165,7 +168,7 @@ const pd_create_f gpu_impl_list[] = {
 #undef INSTANCE
 } // namespace
 
-const pd_create_f *gpu_impl_list_t::get_implementation_list() {
+const impl_list_item_t *gpu_impl_list_t::get_implementation_list() {
     return gpu_impl_list;
 }
 

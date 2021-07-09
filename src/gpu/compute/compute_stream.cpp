@@ -59,13 +59,15 @@ status_t compute_stream_t::zero_pad(
     zero_pad_args[DNNL_ARG_SRC] = arg;
     exec_ctx_t zero_pad_ctx(this, std::move(zero_pad_args));
     zero_pad_ctx.set_resource_mapper(mapper);
-    if (get_verbose()) {
-        const int str_size = 64;
-        char md_fmt[str_size];
-        char md_dim[str_size];
-        dnnl_md2fmt_str(md_fmt, str_size, memory->md());
-        dnnl_md2dim_str(md_dim, str_size, memory->md());
 
+    // Verbose is implemented separately here since fake primitive descriptor
+    // contains only primitive_kind in internal op_desc, but no md. Such design
+    // was chosen to avoid re-creation of zeropad primitive in case it lives as
+    // a regular one in cache and may be evicted from there. It means that md
+    // is available only with incoming memory at execution point here, that's
+    // why separate logic is written apart from a common place.
+    // XXX: re-consider, once zeropad appears in other places in the library.
+    if (get_verbose()) {
         this->wait();
         double start_ms = get_msec();
         CHECK(zero_pad_primitive->execute(zero_pad_ctx));
@@ -73,10 +75,12 @@ status_t compute_stream_t::zero_pad(
         double duration_ms = get_msec() - start_ms;
         std::string stamp;
         if (get_verbose_timestamp()) stamp = "," + std::to_string(start_ms);
+        std::string md_fmt_str = md2fmt_str(memory->md());
+        std::string md_dim_str = md2dim_str(memory->md());
 
         printf("dnnl_verbose%s,exec,%s,%s,undef,%s,,,%s,%g\n", stamp.c_str(),
-                "gpu,zero_pad", zero_pad_primitive->pd()->name(), md_fmt,
-                md_dim, duration_ms);
+                "gpu,zero_pad", zero_pad_primitive->pd()->name(),
+                md_fmt_str.c_str(), md_dim_str.c_str(), duration_ms);
 
         return status;
     } else {

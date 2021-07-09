@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -239,6 +239,10 @@ dnnl_status_t DNNL_API dnnl_primitive_create(dnnl_primitive_t *primitive,
 ///     #dnnl_primitive_desc_query_md(#dnnl_query_exec_arg_md, index).
 /// @returns #dnnl_success on success and a status describing the error
 ///     otherwise.
+
+/// @note If any argument in @param args is padded (padded_dims >
+/// dims), the primitive execution will assume properly zero-padded
+/// input arguments, and produce zero-padded output arguments.
 dnnl_status_t DNNL_API dnnl_primitive_execute(const_dnnl_primitive_t primitive,
         dnnl_stream_t stream, int nargs, const dnnl_exec_arg_t *args);
 
@@ -576,8 +580,8 @@ dnnl_primitive_kind_t DNNL_API dnnl_post_ops_get_kind(
 /// integer-based computations when the result and previous activations have
 /// different logical scaling factors.
 ///
-/// In the simplest case when the accumulation is the only post-op, the
-/// computations would be:
+/// In the simplest case where the accumulation is the only post-op, the
+/// computations will be:
 ///
 ///     dst[:] <- scale * dst[:] + op(...) // instead of dst[:] <- op(...)
 ///
@@ -603,15 +607,15 @@ dnnl_status_t DNNL_API dnnl_post_ops_append_sum(
 /// integer-based computations when the result and previous activations have
 /// different logical scaling factors.
 ///
-/// In the simplest case when the accumulation is the only post-op, the
-/// computations would be:
+/// In the simplest case where the accumulation is the only post-op, the
+/// computations will be:
 ///
 ///     dst[:] <- scale * dst[:] + op(...) // instead of dst[:] <- op(...)
 ///
 /// If @p data_type is specified, original dst tensor will be reinterpreted
 /// as a tensor with provided data type. Since it is reinterpretation,
-/// data_type and dst data type should have same size.
-/// As a result, computations would be:
+/// data_type and dst data type should have the same size.
+/// As a result, computations will be:
 ///
 ///     dst[:] <- scale * as_data_type(dst[:]) + op(...)
 ///                                        // instead of dst[:] <- op(...)
@@ -626,6 +630,42 @@ dnnl_status_t DNNL_API dnnl_post_ops_append_sum(
 ///     otherwise.
 dnnl_status_t DNNL_API dnnl_post_ops_append_sum_v2(
         dnnl_post_ops_t post_ops, float scale, dnnl_data_type_t data_type);
+
+/// Appends an accumulation v3 (sum) to post-ops. Prior to accumulating the
+/// result, a zero point is subtracted from the previous value and is
+/// multiplied by the scale.
+///
+/// The kind of this post-op is #dnnl_sum.
+///
+/// This feature may improve performance for cases like dequantize the
+/// asymmetrically quantized sum's src1 tensor to f32 domain before performing
+/// the sum operation by subtracting the @p zero_point before the scaling.
+///
+/// In the simplest case where accumulation is the only post-op, the
+/// computations will be:
+///
+///     dst[:] <- scale * (dst[:] - zero_point) + op(...)
+///                                             // instead of dst[:] <- op(...)
+///
+/// If @p data_type is specified, original dst tensor will be reinterpreted
+/// as a tensor with provided data type. Since it is reinterpretation,
+/// data_type and dst data type should have the same size.
+/// As a result, computations will be:
+///
+///     dst[:] <- scale * (as_data_type(dst[:]) - zero_point) + op(...)
+///                                        // instead of dst[:] <- op(...)
+/// @note
+///     This post-op executes in-place and does not change the
+///     destination layout.
+///
+/// @param post_ops Post-ops.
+/// @param scale Accumulation scaling factor.
+/// @param zero_point Single scalar int32_t value of zero point.
+/// @param data_type Accumulation data_type.
+/// @returns #dnnl_success on success and a status describing the error
+///     otherwise.
+dnnl_status_t DNNL_API dnnl_post_ops_append_sum_v3(dnnl_post_ops_t post_ops,
+        float scale, int32_t zero_point, dnnl_data_type_t data_type);
 
 /// Returns the parameters of an accumulation (sum) post-op.
 ///
@@ -651,6 +691,20 @@ dnnl_status_t DNNL_API dnnl_post_ops_get_params_sum(
 dnnl_status_t DNNL_API dnnl_post_ops_get_params_sum_v2(
         const_dnnl_post_ops_t post_ops, int index, float *scale,
         dnnl_data_type_t *data_type);
+
+/// Returns the parameters of an accumulation (sum) post-op with
+/// zero point and data type parameter.
+///
+/// @param post_ops Post-ops.
+/// @param index Index of the sum post-op.
+/// @param scale Output accumulation scaling factor.
+/// @param zero_point Zero point.
+/// @param data_type Data type for accumulation.
+/// @returns #dnnl_success on success and a status describing the error
+///     otherwise.
+dnnl_status_t DNNL_API dnnl_post_ops_get_params_sum_v3(
+        const_dnnl_post_ops_t post_ops, int index, float *scale,
+        int32_t *zero_point, dnnl_data_type_t *data_type);
 
 /// Appends an elementwise post-op.
 ///
@@ -1015,6 +1069,12 @@ int DNNL_API dnnl_memory_desc_equal(
 size_t DNNL_API dnnl_memory_desc_get_size(
         const dnnl_memory_desc_t *memory_desc);
 
+/// Returns the size of data type.
+///
+/// @param data_type Data type.
+/// @returns The number of bytes occupied by data type.
+size_t DNNL_API dnnl_data_type_size(dnnl_data_type_t data_type);
+
 /// Creates a memory object.
 ///
 /// Unless @p handle is equal to DNNL_MEMORY_NONE, the constructed memory
@@ -1124,26 +1184,6 @@ dnnl_status_t DNNL_API dnnl_memory_set_data_handle(
 
 /// Sets the underlying memory buffer.
 ///
-/// This function may write zero values to the memory specified by the @p
-/// handle if the memory object has a zero padding area. This may be time
-/// consuming and happens each time this function is called. The operation is
-/// always blocking and the stream parameter is a hint.
-///
-/// @note
-///     The zero padding is required by memory objects created with blocked
-///     memory format tags like #dnnl_aBcd8b when any of the dimensions is not
-///     a multiple of the corresponding block size. For "plain" formats like
-///     #dnnl_nchw or #dnnl_nhwc zero padding area needs to be set up
-///     explicitly when creating the corresponding memory descriptors. See
-///     @ref dev_guide_understanding_memory_formats for more details.
-///
-/// @note
-///     Even when the memory object is used to hold values that stay constant
-///     during the execution of the program (pre-packed weights during
-///     inference, for example), the function will still write zeroes to the
-///     padding area if it exists. Hence, the @p handle parameter cannot and
-///     does not have a const qualifier.
-///
 /// @param memory Memory object.
 /// @param handle Data handle. For the CPU engine, the data handle is a
 ///     pointer to the actual data. For OpenCL it is a `cl_mem`.
@@ -1252,8 +1292,9 @@ dnnl_status_t DNNL_API dnnl_sum_primitive_desc_create(
 ///
 /// @param binary_desc Output descriptor for a binary primitive.
 /// @param alg_kind Algorithm kind. Valid values are #dnnl_binary_add,
-///     #dnnl_binary_mul, #dnnl_binary_max, #dnnl_binary_min, #dnnl_binary_div
-///     and #dnnl_binary_sub.
+///     #dnnl_binary_mul, #dnnl_binary_max, #dnnl_binary_min, #dnnl_binary_div,
+///     #dnnl_binary_sub, #dnnl_binary_ge, #dnnl_binary_gt, #dnnl_binary_le,
+///     #dnnl_binary_lt, #dnnl_binary_eq and #dnnl_binary_ne.
 /// @param src0_desc Source 0 memory descriptor.
 /// @param src1_desc Source 1 memory descriptor.
 /// @param dst_desc Destination memory descriptor.
@@ -3494,8 +3535,9 @@ dnnl_status_t DNNL_API dnnl_set_jit_profiling_jitdumpdir(const char *dir);
 /// #dnnl_cpu_isa_t and #dnnl::cpu_isa for the list of the values accepted by
 /// the C and C++ API functions respectively.
 ///
-/// This function has effect only before the first JIT kernel is generated and
-/// will return an error afterwards.
+/// This function has effect only once, and returns an error on subsequent
+/// calls. It should also be invoked before any other oneDNN API call, otherwise
+/// it may return an error.
 ///
 /// This function overrides the DNNL_MAX_CPU_ISA environment variable. The
 /// environment variable can be set to the desired maximal ISA name in upper
@@ -3537,8 +3579,9 @@ dnnl_cpu_isa_t DNNL_API dnnl_get_effective_cpu_isa(void);
 /// #dnnl::cpu_isa_hints for the list of the values accepted by the C and C++
 /// API functions respectively.
 ///
-/// This function has effect only before the first JIT kernel is generated and
-/// will return an error afterwards.
+/// This function has effect only once, and returns an error on subsequent
+/// calls. It should also be invoked before any other oneDNN API call, otherwise
+/// it may return an error.
 ///
 /// This function overrides the DNNL_CPU_ISA_HINTS environment variable.
 /// @sa @ref dev_guide_cpu_isa_hints for more details

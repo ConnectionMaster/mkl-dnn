@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -55,7 +55,8 @@ struct gemm_inner_product_fwd_t : public primitive_t {
                     && dense_gemm_consitency_check(
                             src_md(), weights_md(), dst_md())
                     && inner_product_utils::post_ops_ok(
-                            attr()->post_ops_, &dst_md_);
+                            attr()->post_ops_, &dst_md_)
+                    && attr_.set_default_formats(dst_md(0)) == status::success;
 
             return ok ? status::success : status::unimplemented;
         }

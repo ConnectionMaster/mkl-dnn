@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -33,12 +33,11 @@ namespace gpu {
 namespace ocl {
 
 struct simple_reorder_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_reorder_pd_t {
         using gpu_reorder_pd_t::gpu_reorder_pd_t;
 
         DECLARE_COMMON_PD_T("ocl:simple:any", simple_reorder_t);
-
-        DECLARE_GPU_REORDER_CREATE();
 
         status_t init(
                 engine_t *engine, engine_t *src_engine, engine_t *dst_engine) {
@@ -93,13 +92,16 @@ struct simple_reorder_t : public gpu_primitive_t {
         }
 
         status_t init_conf(engine_t *engine);
+        void alt_gen();
+        void alt_defines(compute::kernel_ctx_t &kernel_ctx) const;
         void init_scratchpad();
         status_t init_kernel_ctx(compute::kernel_ctx_t &kernel_ctx) const;
 
         reorder_conf_t conf;
-    };
 
-    simple_reorder_t(const pd_t *apd) : gpu_primitive_t(apd) {}
+    private:
+        DECLARE_GPU_REORDER_CREATE();
+    };
 
     status_t init(engine_t *engine) override {
         compute::kernel_ctx_t kernel_ctx;

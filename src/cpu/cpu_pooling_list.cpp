@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 * Copyright 2020 FUJITSU LIMITED
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
@@ -35,13 +35,11 @@ namespace dnnl {
 namespace impl {
 namespace cpu {
 
-using pd_create_f = engine_t::primitive_desc_create_f;
-
 namespace {
 using namespace dnnl::impl::data_type;
 
 // clang-format off
-const pd_create_f impl_list[] = {
+const impl_list_item_t impl_list[] = {
         /* fp */
         CPU_INSTANCE_X64(jit_uni_pooling_fwd_t<avx512_core, bf16>)
         CPU_INSTANCE_X64(jit_uni_pooling_bwd_t<avx512_core, bf16>)
@@ -77,14 +75,14 @@ const pd_create_f impl_list[] = {
         CPU_INSTANCE(ref_pooling_fwd_t<s32>)
         CPU_INSTANCE(ref_pooling_fwd_t<s8, s32>)
         CPU_INSTANCE(ref_pooling_fwd_t<u8, s32>)
-        CPU_INSTANCE(ref_pooling_bwd_t<s32>)
         /* eol */
         nullptr,
 };
 // clang-format on
 } // namespace
 
-const pd_create_f *get_pooling_v2_impl_list(const pooling_v2_desc_t *desc) {
+const impl_list_item_t *get_pooling_v2_impl_list(
+        const pooling_v2_desc_t *desc) {
     UNUSED(desc);
     return impl_list;
 }

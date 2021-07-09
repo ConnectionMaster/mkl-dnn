@@ -61,14 +61,14 @@ case of max pooling) `workspace`.
 When executed, the inputs and outputs should be mapped to an execution
 argument index as specified by the following table.
 
-| Primitive input/output | Execution argument index                                                  |
-| ---                    | ---                                                                       |
-| \src                   | DNNL_ARG_SRC                                                              |
-| \dst                   | DNNL_ARG_DST                                                              |
-| workspace              | DNNL_ARG_WORKSPACE                                                        |
-| \diffsrc               | DNNL_ARG_DIFF_SRC                                                         |
-| \diffdst               | DNNL_ARG_DIFF_DST                                                         |
-| \f$binary post-op\f$   | DNNL_ARG_ATTR_MULTIPLE_POST_OP(binary_post_op_position) \| DNNL_ARG_SRC_1 |
+| Primitive input/output      | Execution argument index                                                  |
+| ---                         | ---                                                                       |
+| \src                        | DNNL_ARG_SRC                                                              |
+| \dst                        | DNNL_ARG_DST                                                              |
+| workspace                   | DNNL_ARG_WORKSPACE                                                        |
+| \diffsrc                    | DNNL_ARG_DIFF_SRC                                                         |
+| \diffdst                    | DNNL_ARG_DIFF_DST                                                         |
+| \f$\text{binary post-op}\f$ | DNNL_ARG_ATTR_MULTIPLE_POST_OP(binary_post_op_position) \| DNNL_ARG_SRC_1 |
 
 ## Implementation Details
 
@@ -92,13 +92,24 @@ argument index as specified by the following table.
 
 The pooling primitive supports the following combinations of data types:
 
-| Propagation        | Source / Destination | Accumulation data type (used for average pooling only)
-| :--                | :--                  | :--
-| forward / backward | f32, bf16            | f32
-| forward            | f16                  | f16
-| forward            | s8, u8, s32          | s32
-| forward inference  | s8, u8 / f32         | f32
-| forward inference  | f32 / s8, u8         | f32
+| Propagation        | Source | Destination | Accumulation data type (used for average pooling only)
+| :--                | :--    | :--         | :--
+| forward / backward | f32    | f32         | f32
+| forward / backward | bf16   | bf16        | bf16
+| forward            | f16    | f16         | f16
+| forward            | s8     | s8          | s32
+| forward            | u8     | u8          | s32
+| forward            | s32    | s32         | s32
+| forward inference  | s8     | u8          | s32
+| forward inference  | u8     | s8          | s32
+| forward inference  | s8     | f16         | f16
+| forward inference  | u8     | f16         | f16
+| forward inference  | f16    | s8          | f16
+| forward inference  | f16    | u8          | f16
+| forward inference  | s8     | f32         | f32
+| forward inference  | u8     | f32         | f32
+| forward inference  | f32    | s8          | f32
+| forward inference  | f32    | u8          | f32
 
 @warning
     There might be hardware and/or implementation specific restrictions.

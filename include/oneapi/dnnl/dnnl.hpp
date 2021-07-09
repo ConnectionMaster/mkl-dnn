@@ -526,6 +526,8 @@ enum class algorithm {
     eltwise_pow = dnnl_eltwise_pow,
     /// Elementwise: round
     eltwise_round = dnnl_eltwise_round,
+    /// Elementwise: hardswish
+    eltwise_hardswish = dnnl_eltwise_hardswish,
     /// Elementwise: rectified linar unit (ReLU) (dst for backward)
     eltwise_relu_use_dst_for_bwd = dnnl_eltwise_relu_use_dst_for_bwd,
     /// Elementwise: hyperbolic tangent non-linearity (tanh) (dst for backward)
@@ -547,7 +549,7 @@ enum class algorithm {
     /// Max pooling
     pooling_max = dnnl_pooling_max,
     /// Average pooling exclude padding,
-    /// alias for #dnnl::algorithm::pooling_avg_include_padding
+    /// alias for #dnnl::algorithm::pooling_avg_exclude_padding
     pooling_avg = dnnl_pooling_avg,
     /// Average pooling include padding
     pooling_avg_include_padding = dnnl_pooling_avg_include_padding,
@@ -577,6 +579,18 @@ enum class algorithm {
     binary_div = dnnl_binary_div,
     /// Binary sub
     binary_sub = dnnl_binary_sub,
+    /// Binary greater than or equal
+    binary_ge = dnnl_binary_ge,
+    /// Binary greater than
+    binary_gt = dnnl_binary_gt,
+    /// Binary less than or equal
+    binary_le = dnnl_binary_le,
+    /// Binary less than
+    binary_lt = dnnl_binary_lt,
+    /// Binary equal
+    binary_eq = dnnl_binary_eq,
+    /// Binary not equal
+    binary_ne = dnnl_binary_ne,
     /// Nearest Neighbor resampling method
     resampling_nearest = dnnl_resampling_nearest,
     /// Linear (Bilinear, Trilinear) resampling method
@@ -641,7 +655,17 @@ enum class normalization_flags : unsigned {
     /// the workspace to implement backward propagation. On inference, the
     /// workspace is not required and behavior is the same as when normalization
     /// is fused with ReLU using the post-ops API.
-    fuse_norm_relu = dnnl_fuse_norm_relu
+    fuse_norm_relu = dnnl_fuse_norm_relu,
+
+    /// Use scale parameter. If specified, the user is expected to pass scale as
+    /// input on forward propagation. On backward propagation of type
+    /// #dnnl::prop_kind::backward, the library computes its derivative.
+    use_scale = dnnl_use_scale,
+
+    /// Use shift parameter. If specified, the user is expected to pass shift as
+    /// input on forward propagation. On backward propagation of type
+    /// #dnnl::prop_kind::backward, the library computes its derivative.
+    use_shift = dnnl_use_shift,
 };
 
 /// Converts normalization flags enum value from C++ API to C API type.
@@ -1147,6 +1171,12 @@ struct memory : public handle<dnnl_memory_t> {
         u8 = dnnl_u8,
     };
 
+    /// Returns size of data type in bytes.
+    /// @returns The number of bytes occupied by data type.
+    static size_t data_type_size(data_type adata_type) {
+        return dnnl_data_type_size(convert_to_c(adata_type));
+    }
+
     /// Memory format kind
     enum class format_kind {
         /// Undefined memory format kind, used for empty memory descriptors.
@@ -1234,6 +1264,8 @@ struct memory : public handle<dnnl_memory_t> {
         abcd = dnnl_abcd,
         /// permuted 4D tensor
         abdc = dnnl_abdc,
+        /// permuted 4D tensor
+        acbd = dnnl_acbd,
         /// permuted 4D tensor
         acdb = dnnl_acdb,
         /// permuted 4D tensor
@@ -1442,6 +1474,13 @@ struct memory : public handle<dnnl_memory_t> {
         AB4b32a4b = dnnl_AB4b32a4b,
         AB4b64a4b = dnnl_AB4b64a4b,
         AB16b16a4b = dnnl_AB16b16a4b,
+        AB16b32a4b = dnnl_AB16b32a4b,
+        AB16b48a4b = dnnl_AB16b48a4b,
+        AB16b64a4b = dnnl_AB16b64a4b,
+        AB16b16a2b = dnnl_AB16b16a2b,
+        AB16b32a2b = dnnl_AB16b32a2b,
+        AB16b48a2b = dnnl_AB16b48a2b,
+        AB16b64a2b = dnnl_AB16b64a2b,
         Abc16a = dnnl_Abc16a,
         ABc16a16b = dnnl_ABc16a16b,
         ABc4a4b = dnnl_ABc4a4b,
@@ -1458,7 +1497,13 @@ struct memory : public handle<dnnl_memory_t> {
         ABc2b8a4b = dnnl_ABc2b8a4b,
         ABc16a16b2a = dnnl_ABc16a16b2a,
         ABc16b16a4b = dnnl_ABc16b16a4b,
+        ABc16b32a4b = dnnl_ABc16b32a4b,
+        ABc16b48a4b = dnnl_ABc16b48a4b,
+        ABc16b64a4b = dnnl_ABc16b64a4b,
         ABc16b16a2b = dnnl_ABc16b16a2b,
+        ABc16b32a2b = dnnl_ABc16b32a2b,
+        ABc16b48a2b = dnnl_ABc16b48a2b,
+        ABc16b64a2b = dnnl_ABc16b64a2b,
         ABc4b4a = dnnl_ABc4b4a,
         ABc8a16b2a = dnnl_ABc8a16b2a,
         ABc8a8b = dnnl_ABc8a8b,
@@ -1491,7 +1536,13 @@ struct memory : public handle<dnnl_memory_t> {
         aBCd2c8b4c = dnnl_aBCd2c8b4c,
         ABcd16a16b2a = dnnl_ABcd16a16b2a,
         ABcd16b16a4b = dnnl_ABcd16b16a4b,
+        ABcd16b32a4b = dnnl_ABcd16b32a4b,
+        ABcd16b48a4b = dnnl_ABcd16b48a4b,
+        ABcd16b64a4b = dnnl_ABcd16b64a4b,
         ABcd16b16a2b = dnnl_ABcd16b16a2b,
+        ABcd16b32a2b = dnnl_ABcd16b32a2b,
+        ABcd16b48a2b = dnnl_ABcd16b48a2b,
+        ABcd16b64a2b = dnnl_ABcd16b64a2b,
         aBCd16b16c2b = dnnl_aBCd16b16c2b,
         aBCd16c16b4c = dnnl_aBCd16c16b4c,
         aBCd16c16b2c = dnnl_aBCd16c16b2c,
@@ -1545,7 +1596,13 @@ struct memory : public handle<dnnl_memory_t> {
         ABcde4b32a4b = dnnl_ABcde4b32a4b,
         ABcde4b64a4b = dnnl_ABcde4b64a4b,
         ABcde16b16a4b = dnnl_ABcde16b16a4b,
+        ABcde16b32a4b = dnnl_ABcde16b32a4b,
+        ABcde16b48a4b = dnnl_ABcde16b48a4b,
+        ABcde16b64a4b = dnnl_ABcde16b64a4b,
         ABcde16b16a2b = dnnl_ABcde16b16a2b,
+        ABcde16b32a2b = dnnl_ABcde16b32a2b,
+        ABcde16b48a2b = dnnl_ABcde16b48a2b,
+        ABcde16b64a2b = dnnl_ABcde16b64a2b,
         ABcde2b8a4b = dnnl_ABcde2b8a4b,
         aBCde8b16c2b = dnnl_aBCde8b16c2b,
         ABcde8b8a = dnnl_ABcde8b8a,
@@ -1622,9 +1679,12 @@ struct memory : public handle<dnnl_memory_t> {
         AB8a2b = dnnl_AB8a2b,
         abDc32d = dnnl_abDc32d,
         abDC32d4c = dnnl_abDC32d4c,
+        abCd32c = dnnl_abCd32c,
         abdEc32e = dnnl_abdEc32e,
         abdEC32e2c = dnnl_abdEC32e2c,
         abdEC32e4c = dnnl_abdEC32e4c,
+        abdCe32c = dnnl_abdCe32c,
+        abdCE32c2e = dnnl_abdCE32c2e,
         aBCdef16c16b4c = dnnl_aBCdef16c16b4c,
         aBdC16b4c = dnnl_aBdC16b4c,
         aBdeC16b4c = dnnl_aBdeC16b4c,
@@ -1700,6 +1760,53 @@ struct memory : public handle<dnnl_memory_t> {
         adefcb = dnnl_adefcb,
         adefCb2c = dnnl_adefCb2c,
         adefCb4c = dnnl_adefCb4c,
+        ABc32a32b = dnnl_ABc32a32b,
+        BAc8a16b2a = dnnl_BAc8a16b2a,
+        BAcd8a16b2a = dnnl_BAcd8a16b2a,
+        ABcde8a16b2a = dnnl_ABcde8a16b2a,
+        aCBd8b16c2b = dnnl_aCBd8b16c2b,
+        BAcde8a16b2a = dnnl_BAcde8a16b2a,
+        aCBde8b16c2b = dnnl_aCBde8b16c2b,
+        ABcde32a32b = dnnl_ABcde32a32b,
+        ABc4a8b8a4b = dnnl_ABc4a8b8a4b,
+        ABcde4a8b8a4b = dnnl_ABcde4a8b8a4b,
+        BAc4b8a8b4a = dnnl_BAc4b8a8b4a,
+        BAcd4b8a8b4a = dnnl_BAcd4b8a8b4a,
+        BAcde4b8a8b4a = dnnl_BAcde4b8a8b4a,
+        aBCd4b8c8b4c = dnnl_aBCd4b8c8b4c,
+        aBCdef4b8c8b4c = dnnl_aBCdef4b8c8b4c,
+        aBCdef8b16c2b = dnnl_aBCdef8b16c2b,
+        aCBdef8b16c2b = dnnl_aCBdef8b16c2b,
+        aBdC16b2c = dnnl_aBdC16b2c,
+        aBdeC16b2c = dnnl_aBdeC16b2c,
+        aBdefC16b2c = dnnl_aBdefC16b2c,
+        aBedc16b = dnnl_aBedc16b,
+        AcB16a2b = dnnl_AcB16a2b,
+        AcdB16a4b = dnnl_AcdB16a4b,
+        AcdeB16a2b = dnnl_AcdeB16a2b,
+        Adcb16a = dnnl_Adcb16a,
+        aCBd4c8b8c4b = dnnl_aCBd4c8b8c4b,
+        aCBde4c8b8c4b = dnnl_aCBde4c8b8c4b,
+        aCBdef4c8b8c4b = dnnl_aCBdef4c8b8c4b,
+        ABc32a16b = dnnl_ABc32a16b,
+        ABcd32a16b = dnnl_ABcd32a16b,
+        ABcde32a16b = dnnl_ABcde32a16b,
+        AB48a16b = dnnl_AB48a16b,
+        AB48a32b = dnnl_AB48a32b,
+        ABc40a16b = dnnl_ABc40a16b,
+        ABc40a32b = dnnl_ABc40a32b,
+        aBC48b16c = dnnl_aBC48b16c,
+        aBC48b32c = dnnl_aBC48b32c,
+        ABcd40a16b = dnnl_ABcd40a16b,
+        ABcd40a32b = dnnl_ABcd40a32b,
+        BA16a16b2a = dnnl_BA16a16b2a,
+        BA16a32b2a = dnnl_BA16a32b2a,
+        BA16a48b2a = dnnl_BA16a48b2a,
+        BA16a64b2a = dnnl_BA16a64b2a,
+        BA16a16b4a = dnnl_BA16a16b4a,
+        BA16a32b4a = dnnl_BA16a32b4a,
+        BA16a48b4a = dnnl_BA16a48b4a,
+        BA16a64b4a = dnnl_BA16a64b4a,
 
         format_tag_last = dnnl_format_tag_last,
 
@@ -1755,7 +1862,13 @@ struct memory : public handle<dnnl_memory_t> {
         OIw8o8i = dnnl_OIw8o8i,
         OIw8o4i = dnnl_OIw8o4i,
         OIw16i16o4i = dnnl_OIw16i16o4i,
+        OIw16i32o4i = dnnl_OIw16i32o4i,
+        OIw16i48o4i = dnnl_OIw16i48o4i,
+        OIw16i64o4i = dnnl_OIw16i64o4i,
         OIw16i16o2i = dnnl_OIw16i16o2i,
+        OIw16i32o2i = dnnl_OIw16i32o2i,
+        OIw16i48o2i = dnnl_OIw16i48o2i,
+        OIw16i64o2i = dnnl_OIw16i64o2i,
         OIw16o16i2o = dnnl_OIw16o16i2o,
         Owi16o = dnnl_Owi16o,
         OwI16o2i = dnnl_OwI16o2i,
@@ -1803,6 +1916,13 @@ struct memory : public handle<dnnl_memory_t> {
         OIdhw8i64o2i = dnnl_OIdhw8i64o2i,
         OIdhw4i16o4i = dnnl_OIdhw4i16o4i,
         OIdhw16i16o4i = dnnl_OIdhw16i16o4i,
+        OIdhw16i32o4i = dnnl_OIdhw16i32o4i,
+        OIdhw16i48o4i = dnnl_OIdhw16i48o4i,
+        OIdhw16i64o4i = dnnl_OIdhw16i64o4i,
+        OIdhw16i16o2i = dnnl_OIdhw16i16o2i,
+        OIdhw16i32o2i = dnnl_OIdhw16i32o2i,
+        OIdhw16i48o2i = dnnl_OIdhw16i48o2i,
+        OIdhw16i64o2i = dnnl_OIdhw16i64o2i,
         OIdhw4i32o4i = dnnl_OIdhw4i32o4i,
         OIdhw4i64o4i = dnnl_OIdhw4i64o4i,
         OIdhw2i8o4i = dnnl_OIdhw2i8o4i,
@@ -1859,9 +1979,14 @@ struct memory : public handle<dnnl_memory_t> {
         gOIhw4o8i8o4i = dnnl_gOIhw4o8i8o4i,
         gOIhw2o8i8o2i = dnnl_gOIhw2o8i8o2i,
         OIhw16i16o4i = dnnl_OIhw16i16o4i,
+        OIhw16i32o4i = dnnl_OIhw16i32o4i,
+        OIhw16i48o4i = dnnl_OIhw16i48o4i,
+        OIhw16i64o4i = dnnl_OIhw16i64o4i,
         OIhw16i16o2i = dnnl_OIhw16i16o2i,
+        OIhw16i32o2i = dnnl_OIhw16i32o2i,
+        OIhw16i48o2i = dnnl_OIhw16i48o2i,
+        OIhw16i64o2i = dnnl_OIhw16i64o2i,
         OIhw16o16i2o = dnnl_OIhw16o16i2o,
-        OIdhw16i16o2i = dnnl_OIdhw16i16o2i,
         gOIhw16i16o4i = dnnl_gOIhw16i16o4i,
         gOIhw16i16o2i = dnnl_gOIhw16i16o2i,
         gOIhw16o16i2o = dnnl_gOIhw16o16i2o,
@@ -1980,6 +2105,45 @@ struct memory : public handle<dnnl_memory_t> {
         gdhwio = dnnl_gdhwio,
         gdhwIo2i = dnnl_gdhwIo2i,
         gdhwIo4i = dnnl_gdhwIo4i,
+        ldIo32i = dnnl_ldIo32i,
+        ldgIo32i = dnnl_ldgIo32i,
+        ldgIO32i2o = dnnl_ldgIO32i2o,
+        nCdhw32c = dnnl_nCdhw32c,
+        nChw32c = dnnl_nChw32c,
+        nCw32c = dnnl_nCw32c,
+        NCw32n16c = dnnl_NCw32n16c,
+        NChw32n16c = dnnl_NChw32n16c,
+        NCdhw32n16c = dnnl_NCdhw32n16c,
+        NCw32n32c = dnnl_NCw32n32c,
+        OI16i16o4i = dnnl_OI16i16o4i,
+        IOw8o16i2o = dnnl_IOw8o16i2o,
+        IOhw8o16i2o = dnnl_IOhw8o16i2o,
+        Owhi16o = dnnl_Owhi16o,
+        OIdhw8o16i2o = dnnl_OIdhw8o16i2o,
+        IOdhw8o16i2o = dnnl_IOdhw8o16i2o,
+        Goiw4g = dnnl_Goiw4g,
+        gIOw8o16i2o = dnnl_gIOw8o16i2o,
+        Goiw32g = dnnl_Goiw32g,
+        Goihw4g = dnnl_Goihw4g,
+        gIOhw8o16i2o = dnnl_gIOhw8o16i2o,
+        Goihw32g = dnnl_Goihw32g,
+        gOwhi16o = dnnl_gOwhi16o,
+        IOw4i8o8i4o = dnnl_IOw4i8o8i4o,
+        IOhw4i8o8i4o = dnnl_IOhw4i8o8i4o,
+        IOdhw4i8o8i4o = dnnl_IOdhw4i8o8i4o,
+        gIOw4i8o8i4o = dnnl_gIOw4i8o8i4o,
+        gIOhw4i8o8i4o = dnnl_gIOhw4i8o8i4o,
+        gIOdhw4i8o8i4o = dnnl_gIOdhw4i8o8i4o,
+        gOIdhw8o16i2o = dnnl_gOIdhw8o16i2o,
+        gIOdhw8o16i2o = dnnl_gIOdhw8o16i2o,
+        Goidhw32g = dnnl_Goidhw32g,
+        OI16i32o4i = dnnl_OI16i32o4i,
+        OI16i48o4i = dnnl_OI16i48o4i,
+        OI16i64o4i = dnnl_OI16i64o4i,
+        OI16i16o2i = dnnl_OI16i16o2i,
+        OI16i32o2i = dnnl_OI16i32o2i,
+        OI16i48o2i = dnnl_OI16i48o2i,
+        OI16i64o2i = dnnl_OI16i64o2i,
     };
 
     /// A memory descriptor.
@@ -2181,18 +2345,18 @@ struct memory : public handle<dnnl_memory_t> {
             return desc(out_md);
         }
 
+        /// Returns the data type of the memory descriptor.
+        /// @returns The data type.
+        memory::data_type data_type() const {
+            return static_cast<memory::data_type>(data.data_type);
+        }
+
         /// Returns dimensions of the memory descriptor.
         ///
         /// Potentially expensive due to the data copy involved.
         /// @returns A copy of the dimensions vector.
         memory::dims dims() const {
             return memory::dims(data.dims, data.dims + data.ndims);
-        }
-
-        /// Returns the data type of the memory descriptor.
-        /// @returns The data type.
-        memory::data_type data_type() const {
-            return static_cast<memory::data_type>(data.data_type);
         }
 
         /// Returns size of the memory descriptor in bytes.
@@ -2486,13 +2650,13 @@ struct post_ops : public handle<dnnl_post_ops_t> {
     /// activations have different logical scaling factors.
     ///
     /// In the simplest case when the accumulation is the only post-op,
-    /// the computations would be `dst[:] := scale * dst[:] + op(...)`
+    /// the computations will be `dst[:] := scale * dst[:] + op(...)`
     /// instead of `dst[:] := op(...)`.
     ///
     /// If @p data_type is specified, the original dst tensor will be
     /// reinterpreted as a tensor with the provided data type. Because it is a
     /// reinterpretation, data_type and dst data type should have the same size.
-    /// As a result, computations would be `dst[:] <- scale *
+    /// As a result, computations will be `dst[:] <- scale *
     /// as_data_type(dst[:]) + op(...)` instead of `dst[:] <- op(...)`.
     ///
     /// @note
@@ -2510,6 +2674,42 @@ struct post_ops : public handle<dnnl_post_ops_t> {
             error::wrap_c_api(dnnl_post_ops_append_sum_v2(get(), scale,
                                       memory::convert_to_c(data_type)),
                     "could not append a sum post-op");
+    }
+
+    /// Appends an accumulation (sum) post-op. Prior to accumulating the
+    /// result, the previous value will be will be reduced by zero point
+    /// @p zero_point and multiplied by a scaling factor @p scale.
+    ///
+    /// The kind of this post-op is #dnnl::primitive::kind::sum.
+    ///
+    /// This feature may improve performance for cases like dequantize the
+    /// asymmetrically quantized sum's src1 tensor to f32 domain before
+    /// performing the sum operation by subtracting @p zero_point before the
+    /// scaling.
+    ///
+    /// In the simplest case when the accumulation is the only post-op,
+    /// the computations will be `dst[:] := scale * (dst[:] - zero_point) +
+    /// op(...)` instead of `dst[:] := op(...)`.
+    ///
+    /// If @p data_type is specified, the original dst tensor will be
+    /// reinterpreted as a tensor with the provided data type. Because it is a
+    /// reinterpretation, data_type and dst data type should have the same size.
+    /// As a result, computations will be `dst[:] <- scale *
+    /// (as_data_type(dst[:]) - zero_point) + op(...)` instead of
+    /// `dst[:] <- op(...)`.
+    ///
+    /// @note
+    ///     This post-op executes in-place and does not change the
+    ///     destination layout.
+    ///
+    /// @param scale Scaling factor.
+    /// @param zero_point Zero point.
+    /// @param data_type Data type.
+    void append_sum(float scale, int32_t zero_point,
+            memory::data_type data_type = memory::data_type::undef) {
+        error::wrap_c_api(dnnl_post_ops_append_sum_v3(get(), scale, zero_point,
+                                  memory::convert_to_c(data_type)),
+                "could not append a sum post-op");
     }
 
     /// Returns the parameters of an accumulation (sum) post-op.
@@ -2531,6 +2731,21 @@ struct post_ops : public handle<dnnl_post_ops_t> {
         dnnl_data_type_t c_data_type;
         error::wrap_c_api(dnnl_post_ops_get_params_sum_v2(
                                   get(), index, &scale, &c_data_type),
+                "could not get parameters of a sum post-op");
+        data_type = static_cast<memory::data_type>(c_data_type);
+    }
+
+    /// Returns the parameters of an accumulation (sum) post-op.
+    ///
+    /// @param index Index of the sum post-op.
+    /// @param scale Scaling factor of the sum post-op.
+    /// @param zero_point Single scalar int32_t value of zeropoint.
+    /// @param data_type Data type of the sum post-op.
+    void get_params_sum(int index, float &scale, int32_t &zero_point,
+            memory::data_type &data_type) const {
+        dnnl_data_type_t c_data_type;
+        error::wrap_c_api(dnnl_post_ops_get_params_sum_v3(get(), index, &scale,
+                                  &zero_point, &c_data_type),
                 "could not get parameters of a sum post-op");
         data_type = static_cast<memory::data_type>(c_data_type);
     }

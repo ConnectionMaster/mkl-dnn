@@ -36,6 +36,23 @@ struct wino_reorder_t : public primitive_t {
 
         DECLARE_COMMON_PD_T("wino_reorder", wino_reorder_t);
 
+        status_t init(
+                engine_t *engine, engine_t *src_engine, engine_t *dst_engine) {
+            status_t status
+                    = cpu_reorder_pd_t::init(engine, src_engine, dst_engine);
+            if (status != status::success) return status;
+
+            bool ok = attr()->has_default_values(
+                    primitive_attr_t::skip_mask_t::oscale
+                    | primitive_attr_t::skip_mask_t::post_ops);
+            if (!ok) return status::unimplemented;
+
+            init_scratchpad();
+
+            return status::success;
+        }
+
+    private:
         static status_t create(reorder_pd_t **reorder_pd, engine_t *engine,
                 const primitive_attr_t *attr, engine_t *src_engine,
                 const memory_desc_t *src_md, engine_t *dst_engine,
@@ -64,23 +81,6 @@ struct wino_reorder_t : public primitive_t {
             return safe_ptr_assign(*reorder_pd, _pd);
         }
 
-        status_t init(
-                engine_t *engine, engine_t *src_engine, engine_t *dst_engine) {
-            status_t status
-                    = cpu_reorder_pd_t::init(engine, src_engine, dst_engine);
-            if (status != status::success) return status;
-
-            bool ok = attr()->has_default_values(
-                    primitive_attr_t::skip_mask_t::oscale
-                    | primitive_attr_t::skip_mask_t::post_ops);
-            if (!ok) return status::unimplemented;
-
-            init_scratchpad();
-
-            return status::success;
-        }
-
-    private:
         void init_scratchpad() {
             const auto &wino_desc = memory_desc_wrapper(dst_md()).wino_desc();
             const int nb_oc = wino_desc.oc / wino_desc.oc_block;
@@ -99,6 +99,7 @@ struct wino_reorder_t : public primitive_t {
             scratchpad.template book<out_data_t>(
                     key_reorder_wino_plain, plain_size);
         }
+        friend dnnl::impl::impl_list_item_t;
     };
 
     wino_reorder_t(const pd_t *apd) : primitive_t(apd) {}
@@ -199,7 +200,7 @@ private:
         assert(r_ == kh_ && r_ == kw_);
 
         parallel_nd_ext(
-                0, ic_, nb_oc_, [&](int ithr, int nthr, int iic, int ob) {
+                0, ic_, nb_oc_, [&](int ithr, int nthr, dim_t iic, dim_t ob) {
                     if (ithr >= work_amount_) return;
 
                     const in_data_t *__restrict _inp = has_oihw_format
@@ -296,7 +297,7 @@ private:
         int index = 0;
         for_(int u_h = 0; u_h < w_alpha_; u_h++)
         for (int u_w = 0; u_w < w_alpha_; u_w++) {
-            for_nd(0, 1, nb_oc_, oc_block_, [&](int ob, int o) {
+            for_nd(0, 1, nb_oc_, oc_block_, [&](dim_t ob, dim_t o) {
                 const int u_h_shift = u_h * w_alpha_ * ic_ * oc_;
                 const int u_w_shift = u_w * ic_ * oc_;
                 const int u_h_shift_b = u_h * w_alpha_ * oc_;
@@ -332,29 +333,31 @@ private:
 
     void reorder_to_aaOio(out_data_t *__restrict output,
             const out_data_t *__restrict tmp_wei) const {
-        parallel_nd(w_alpha_, w_alpha_, nb_oc_, [&](int u_h, int u_w, int ob) {
-            for_(int ib = 0; ib < nb_ic_; ib++)
-            for_(int i = 0; i < ic_block_; i++)
-            for (int o = 0; o < oc_block_; o++) {
-                const int src_offset = u_h * w_alpha_ * ic_ * oc_
-                        + u_w * ic_ * oc_ + (ib * ic_block_ + i) * oc_
-                        + (ob * oc_block_ + o);
+        parallel_nd(w_alpha_, w_alpha_, nb_oc_,
+                [&](dim_t u_h, dim_t u_w, dim_t ob) {
+                    for_(int ib = 0; ib < nb_ic_; ib++)
+                    for_(int i = 0; i < ic_block_; i++)
+                    for (int o = 0; o < oc_block_; o++) {
+                        const int src_offset = u_h * w_alpha_ * ic_ * oc_
+                                + u_w * ic_ * oc_ + (ib * ic_block_ + i) * oc_
+                                + (ob * oc_block_ + o);
 
-                const int dst_offset = u_h * w_alpha_ * nb_oc_ * nb_ic_
-                                * ic_block_ * oc_block_
-                        + u_w * nb_oc_ * nb_ic_ * ic_block_ * oc_block_
-                        + ob * nb_ic_ * ic_block_ * oc_block_
-                        + ib * ic_block_ * oc_block_ + i * oc_block_ + o;
-                output[dst_offset] = tmp_wei[src_offset];
-            }
-        });
+                        const int dst_offset = u_h * w_alpha_ * nb_oc_ * nb_ic_
+                                        * ic_block_ * oc_block_
+                                + u_w * nb_oc_ * nb_ic_ * ic_block_ * oc_block_
+                                + ob * nb_ic_ * ic_block_ * oc_block_
+                                + ib * ic_block_ * oc_block_ + i * oc_block_
+                                + o;
+                        output[dst_offset] = tmp_wei[src_offset];
+                    }
+                });
     }
 
     void reorder_to_aaOBiOo(out_data_t *__restrict output,
             const out_data_t *__restrict tmp_wei) const {
         const int oc_chunks = nb_oc_ / oc2_block_;
-        parallel_nd(
-                w_alpha_, w_alpha_, oc_chunks, [&](int u_h, int u_w, int occ) {
+        parallel_nd(w_alpha_, w_alpha_, oc_chunks,
+                [&](dim_t u_h, dim_t u_w, dim_t occ) {
                     for (int ib = 0; ib < nb_ic_; ib++) {
                         out_data_t *__restrict wei_ptr = output
                                 + (((u_h * w_alpha_ + u_w) * oc_chunks + occ)
@@ -384,8 +387,8 @@ private:
             const out_data_t *__restrict tmp_wei) const {
         const int ic_chunks = nb_ic_ / ic2_block_;
         const int oc_chunks = nb_oc_ / oc2_block_;
-        parallel_nd(
-                oc_chunks, w_alpha_, w_alpha_, [&](int occ, int u_h, int u_w) {
+        parallel_nd(oc_chunks, w_alpha_, w_alpha_,
+                [&](dim_t occ, dim_t u_h, dim_t u_w) {
                     for_(int icc = 0; icc < ic_chunks; icc++)
                     for (int ob = 0; ob < oc2_block_; ob++) {
                         const int ocp = (occ * oc2_block_ + ob) * oc_block_;
@@ -445,10 +448,10 @@ private:
 
     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
     int r_, w_alpha_;
-    int ic_, oc_, or_ic_, or_oc_, kh_, kw_;
-    int oc_block_, ic_block_, oc2_block_, ic2_block_;
+    dim_t ic_, oc_, or_ic_, or_oc_, kh_, kw_;
+    dim_t oc_block_, ic_block_, oc2_block_, ic2_block_;
     float adj_scale_;
-    int nb_oc_, nb_ic_;
+    dim_t nb_oc_, nb_ic_;
     dnnl_wino_memory_format_t wino_format_;
     int size_wino_wei_;
     int size_wspace_thr_;

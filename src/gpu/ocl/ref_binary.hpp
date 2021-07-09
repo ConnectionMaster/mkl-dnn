@@ -33,6 +33,7 @@ namespace gpu {
 namespace ocl {
 
 struct ref_binary_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_binary_pd_t {
         using gpu_binary_pd_t::gpu_binary_pd_t;
 
@@ -56,7 +57,8 @@ struct ref_binary_t : public gpu_primitive_t {
                             check_scales_mask())
                     && attr()->has_default_values(attr_skip_mask)
                     && post_ops_with_binary_ok(
-                            attr(), dst_md()->data_type, MAX_NDIMS);
+                            attr(), dst_md()->data_type, MAX_NDIMS)
+                    && attr_.set_default_formats(dst_md(0)) == status::success;
 
             if (!ok) return status::unimplemented;
 
@@ -134,8 +136,6 @@ struct ref_binary_t : public gpu_primitive_t {
             return true;
         }
     };
-
-    ref_binary_t(const pd_t *apd) : gpu_primitive_t(apd) {}
 
     status_t init(engine_t *engine) override {
         compute::kernel_ctx_t kernel_ctx;

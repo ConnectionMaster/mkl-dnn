@@ -84,7 +84,7 @@ struct resampling_pd_t : public primitive_desc_t {
         return memory_desc_wrapper(src_desc()).has_zero_dim();
     }
 
-    int n_inputs() const override { return 1; }
+    int n_inputs() const override { return 1 + n_binary_po_inputs(); }
     int n_outputs() const override { return 1; }
 
 protected:
@@ -138,14 +138,19 @@ protected:
     memory_desc_t src_md_;
     memory_desc_t dst_md_;
 
-    virtual status_t set_default_params() {
+    virtual status_t set_default_params(
+            format_tag_t src_tag_hint = format_tag::undef) {
         if (dst_md()->format_kind != format_kind::any) return status::success;
 
         if (src_md()->format_kind != format_kind::blocked)
             return status::unimplemented;
 
-        return memory_desc_init_by_blocking_desc(
-                dst_md_, src_md_.format_desc.blocking);
+        if (src_tag_hint != format_tag::undef) {
+            return memory_desc_init_by_tag(dst_md_, src_tag_hint);
+        } else {
+            return memory_desc_init_by_blocking_desc(
+                    dst_md_, src_md_.format_desc.blocking);
+        }
     }
 };
 

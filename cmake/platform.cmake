@@ -25,15 +25,15 @@ set(platform_cmake_included true)
 include("cmake/utils.cmake")
 
 if (DNNL_LIBRARY_TYPE STREQUAL "SHARED")
-    add_definitions(-DDNNL_DLL)
+    add_definitions_with_host_compiler(-DDNNL_DLL)
 endif()
 
 # Specify the target architecture
-add_definitions(-DDNNL_${DNNL_TARGET_ARCH}=1)
+add_definitions_with_host_compiler(-DDNNL_${DNNL_TARGET_ARCH}=1)
 
 # UNIT8_MAX-like macros are a part of the C99 standard and not a part of the
 # C++ standard (see C99 standard 7.18.2 and 7.18.4)
-add_definitions(-D__STDC_LIMIT_MACROS -D__STDC_CONSTANT_MACROS)
+add_definitions_with_host_compiler(-D__STDC_LIMIT_MACROS -D__STDC_CONSTANT_MACROS)
 
 set(CMAKE_CCXX_FLAGS)
 set(CMAKE_CCXX_NOWARN_FLAGS)
@@ -49,22 +49,52 @@ if($ENV{DNNL_WERROR})
     set(DNNL_WERROR $ENV{DNNL_WERROR})
 endif()
 
-if(WIN32 AND DNNL_WITH_SYCL)
-    # XXX: Intel oneAPI DPC++ Compiler defines __GNUC__ and __STDC__ macros on
-    # Windows. It is not aligned with clang behavior so manually undefine them.
-    add_definitions(-U__GNUC__ -U__STDC__)
-    # XXX: workaround for 'unknown type name IUnknown' from combaseapi.h
-    add_definitions(-DCINTERFACE)
-    # XXX: Intel oneAPI DPC++ Compiler generates a lot of warnings
-    append(CMAKE_CCXX_FLAGS "-w")
-    # XXX: ignore __declspec warning
-    append(CMAKE_CCXX_FLAGS "-Wno-ignored-attributes")
-    # XXX: ignore 'XXX is deprecated' coming from Intel TBB headers
+# The flags that can be used for the main and host compilers should be moved to
+# the macros to avoid code duplication and ensure consistency.
+macro(platform_unix_and_mingw_common_ccxx_flags var)
+    append(${var} "-Wall -Wno-unknown-pragmas")
+    append_if(DNNL_WERROR ${var} "-Werror")
+    append(${var} "-fvisibility=internal")
+endmacro()
+
+macro(platform_unix_and_mingw_common_cxx_flags var)
+    append(${var} "-fvisibility-inlines-hidden")
+endmacro()
+
+macro(platform_unix_and_mingw_noexcept_ccxx_flags var)
+    append(${var} "-fno-exceptions")
+endmacro()
+
+macro(platform_gnu_x64_arch_ccxx_flags var)
+    set(${var} "-msse4.1")
+endmacro()
+
+macro(platform_gnu_nowarn_ccxx_flags var)
+    # suppress warning on assumptions made regarding overflow (#146)
+    append(${var} "-Wno-strict-overflow")
+endmacro()
+
+if(DNNL_WITH_SYCL)
+    # XXX: SYCL deprecated some API, suppress warnings for now.
     append(CMAKE_CCXX_FLAGS "-Wno-deprecated-declarations")
-    # Ignore warning LNK4078: multiple '__CLANG_OFFLOAD_BUNDLE__sycl-spi'
-    # sections found with different attributes
-    append(CMAKE_EXE_LINKER_FLAGS "-Xlinker /IGNORE:4078")
-    append(CMAKE_SHARED_LINKER_FLAGS "-Xlinker /IGNORE:4078")
+    # Clang cannot vectorize some loops with #pragma omp simd and gets
+    # very upset. Tell it that it's okay and that we love it
+    # unconditionally.
+    append(CMAKE_CCXX_NOWARN_FLAGS "-Wno-pass-failed")
+
+    if(WIN32)
+        # XXX: SYCL does not like __thiscall convention coming from TBB,
+        # suppress warnings for now.
+        append(CMAKE_CCXX_FLAGS "-Wno-ignored-attributes")
+        # XXX: compiler always pulls in release C++ runtime by default, until
+        # this is fixed we have to explicitly drop release C++ runtime for
+        # debug build types.
+        string(TOUPPER "${CMAKE_BUILD_TYPE}" UPPERCASE_CMAKE_BUILD_TYPE)
+        if(UPPERCASE_CMAKE_BUILD_TYPE MATCHES "(DEBUG|RELWITHMDD)")
+            append(CMAKE_EXE_LINKER_FLAGS "-Xlinker /NODEFAULTLIB:msvcrt")
+            append(CMAKE_SHARED_LINKER_FLAGS "-Xlinker /NODEFAULTLIB:msvcrt")
+        endif()
+    endif()
 endif()
 
 if(MSVC)
@@ -72,6 +102,8 @@ if(MSVC)
     append_if(DNNL_WERROR CMAKE_CCXX_FLAGS "/WX")
     if(${CMAKE_CXX_COMPILER_ID} STREQUAL MSVC)
         append(CMAKE_CCXX_FLAGS "/MP")
+        # increase number of sections in obj file
+        append(CMAKE_CCXX_FLAGS "/bigobj")
         # int -> bool
         append(CMAKE_CCXX_NOWARN_FLAGS "/wd4800")
         # unknown pragma
@@ -85,6 +117,8 @@ if(MSVC)
     endif()
     if(CMAKE_CXX_COMPILER_ID STREQUAL "Intel")
         append(CMAKE_CCXX_FLAGS "/MP")
+        # increase number of sections in obj file
+        append(CMAKE_CCXX_FLAGS "/bigobj")
         set(DEF_ARCH_OPT_FLAGS "-QxSSE4.1")
         # disable: loop was not vectorized with "simd"
         append(CMAKE_CCXX_NOWARN_FLAGS "-Qdiag-disable:13379")
@@ -111,16 +145,21 @@ if(MSVC)
         # We don't want to optimize jit gemm kernels to reduce compile time
         append(CMAKE_CCXX_FLAGS "-Wno-overriding-t-option")
     endif()
-elseif(UNIX OR MINGW)
-    append(CMAKE_CCXX_FLAGS "-Wall -Wno-unknown-pragmas")
-    if(DNNL_WITH_SYCL)
-        # XXX: Intel oneAPI DPC++ Compiler generates a lot of warnings
-        append(CMAKE_CCXX_FLAGS "-w")
+    if(DNNL_WITH_SYCL OR CMAKE_BASE_NAME STREQUAL "icx" OR CMAKE_BASE_NAME STREQUAL "icpx")
+        # Default fp-model in icx and dpcpp (unlike clang) may be precise or
+        # fast=1 depending on the version.
+        append(CMAKE_CCXX_FLAGS "/fp:precise")
     endif()
-    append_if(DNNL_WERROR CMAKE_CCXX_FLAGS "-Werror")
-    append(CMAKE_CCXX_FLAGS "-fvisibility=internal")
-    append(CMAKE_CXX_FLAGS "-fvisibility-inlines-hidden")
-    append(CMAKE_CCXX_NOEXCEPT_FLAGS "-fno-exceptions")
+elseif(UNIX OR MINGW)
+    if(DNNL_WITH_SYCL OR CMAKE_BASE_NAME STREQUAL "icx" OR CMAKE_BASE_NAME STREQUAL "icpx")
+        # Default fp-model in icx and dpcpp (unlike clang) may be precise or
+        # fast=1 depending on the version.
+        append(CMAKE_CCXX_FLAGS "-ffp-model=precise -fno-reciprocal-math")
+    endif()
+
+    platform_unix_and_mingw_common_ccxx_flags(CMAKE_CCXX_FLAGS)
+    platform_unix_and_mingw_common_cxx_flags(CMAKE_CXX_FLAGS)
+    platform_unix_and_mingw_noexcept_ccxx_flags(CMAKE_CMAKE_CCXX_NOEXCEPT_FLAGS)
     # compiler specific settings
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         if(DNNL_TARGET_ARCH STREQUAL "AARCH64")
@@ -171,7 +210,6 @@ elseif(UNIX OR MINGW)
             append(CMAKE_CCXX_SANITIZER_FLAGS "-fsanitize=undefined")
             append(CMAKE_CCXX_SANITIZER_FLAGS
                 "-fno-sanitize=function,vptr")  # work around linking problems
-            append(CMAKE_CCXX_SANITIZER_FLAGS "-fno-omit-frame-pointer")
             set(DNNL_ENABLED_CLANG_SANITIZER "${DNNL_USE_CLANG_SANITIZER}")
         elseif(DNNL_USE_CLANG_SANITIZER STREQUAL "Address")
             append(CMAKE_CCXX_SANITIZER_FLAGS "-fsanitize=address")
@@ -191,6 +229,10 @@ elseif(UNIX OR MINGW)
                 "Using Clang ${DNNL_ENABLED_CLANG_SANITIZER} "
                 "sanitizer (experimental!)")
             append(CMAKE_CCXX_SANITIZER_FLAGS "-g -fno-omit-frame-pointer")
+            # Blacklist to ignore false-positive cases. Each case may be
+            # assigned to a specific sanitizer. See online doc for help.
+            append(CMAKE_CCXX_SANITIZER_FLAGS
+                   "-fsanitize-blacklist=${PROJECT_SOURCE_DIR}/.clang-ignorelist")
         endif()
 
         if (DNNL_USE_CLANG_TIDY MATCHES "(CHECK|FIX)" AND ${CMAKE_VERSION} VERSION_LESS "3.6.0")
@@ -211,6 +253,12 @@ elseif(UNIX OR MINGW)
         endif()
 
     elseif("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU")
+        # XXX: Suppress a warning that pops up when using a function pointer
+        # to an OpenCL function as a template argument (GCC Bugzilla – Bug 71463).
+        if (DNNL_GPU_RUNTIME STREQUAL "OCL")
+            append(CMAKE_CCXX_FLAGS "-Wno-ignored-attributes")
+        endif()
+
         if(DNNL_TARGET_ARCH STREQUAL "AARCH64")
              if (NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
                  set(DEF_ARCH_OPT_FLAGS "-O3")
@@ -238,10 +286,9 @@ elseif(UNIX OR MINGW)
                  append(DEF_ARCH_OPT_FLAGS "-march=native")
              endif()
         elseif(DNNL_TARGET_ARCH STREQUAL "X64")
-             set(DEF_ARCH_OPT_FLAGS "-msse4.1")
+             platform_gnu_x64_arch_ccxx_flags(DEF_ARCH_OPT_FLAGS)
         endif()
-        # suppress warning on assumptions made regarding overflow (#146)
-        append(CMAKE_CCXX_NOWARN_FLAGS "-Wno-strict-overflow")
+        platform_gnu_nowarn_ccxx_flags(CMAKE_CCXX_NOWARN_FLAGS)
     elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Intel")
         set(DEF_ARCH_OPT_FLAGS "-xSSE4.1")
         # workaround for Intel Compiler that produces error caused

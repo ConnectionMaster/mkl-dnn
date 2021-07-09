@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -41,13 +41,13 @@ std::string to_string(ctx_kind kind) {
     return strs[static_cast<int>(kind)];
 }
 
+} // namespace
+
 struct sycl_engine_test_params {
     dev_kind adev_kind;
     ctx_kind actx_kind;
     dnnl_status_t expected_status;
 };
-
-} // namespace
 
 class sycl_engine_test
     : public ::testing::TestWithParam<sycl_engine_test_params> {
@@ -95,6 +95,11 @@ protected:
 
 TEST_P(sycl_engine_test, BasicInterop) {
     auto param = GetParam();
+#if DNNL_CPU_RUNTIME == DNNL_RUNTIME_NONE
+    SKIP_IF(param.adev_kind != dev_kind::gpu
+                    && param.adev_kind != dev_kind::gpu_only,
+            "Skip non-GPU engine kinds for GPU only configuration");
+#endif
 
     device *dev_ptr = nullptr;
     switch (param.adev_kind) {
@@ -121,6 +126,17 @@ TEST_P(sycl_engine_test, BasicInterop) {
 
     catch_expected_failures(
             [&]() {
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_SYCL
+                if (!impl::utils::one_of(param.adev_kind, dev_kind::gpu,
+                            dev_kind::gpu_only)) {
+                    engine eng(engine::kind::cpu, 0);
+                    EXPECT_ANY_THROW(sycl_interop::make_engine(dev, ctx));
+                    EXPECT_ANY_THROW(sycl_interop::get_device(eng));
+                    EXPECT_ANY_THROW(sycl_interop::get_context(eng));
+
+                    return;
+                }
+#endif
                 auto eng = sycl_interop::make_engine(dev, ctx);
                 if (param.expected_status != dnnl_success) {
                     FAIL() << "Success not expected";
@@ -133,6 +149,14 @@ TEST_P(sycl_engine_test, BasicInterop) {
 }
 
 TEST(sycl_engine_test, HostDevice) {
+#if DNNL_CPU_RUNTIME == DNNL_RUNTIME_NONE
+    SKIP_IF(true, "Skip test for host device for GPU only configuration");
+#endif
+
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_SYCL
+    SKIP_IF(true, "Skip this test for classic CPU runtime");
+#endif
+
     device dev(host_selector {});
     context ctx(dev);
 
@@ -144,6 +168,7 @@ TEST(sycl_engine_test, HostDevice) {
 
     {
         auto *ptr = mem.map_data<float>();
+        GTEST_EXPECT_NE(ptr, nullptr);
         for (size_t i = 0; i < mem_d.get_size() / sizeof(float); ++i)
             ptr[i] = float(i) * (i % 2 == 0 ? 1 : -1);
         mem.unmap_data(ptr);
@@ -159,11 +184,53 @@ TEST(sycl_engine_test, HostDevice) {
 
     {
         auto *ptr = mem.map_data<float>();
+        GTEST_EXPECT_NE(ptr, nullptr);
         for (size_t i = 0; i < mem_d.get_size() / sizeof(float); ++i)
             ASSERT_EQ(ptr[i], (i % 2 == 0 ? i : 0));
         mem.unmap_data(ptr);
     }
 }
+
+TEST_P(sycl_engine_test, SubDevice) {
+    auto param = GetParam();
+#if DNNL_CPU_RUNTIME == DNNL_RUNTIME_NONE
+    SKIP_IF(param.adev_kind != dev_kind::gpu
+                    && param.adev_kind != dev_kind::gpu_only,
+            "Skip non-GPU engine kinds for GPU only configuration");
+#endif
+
+    SKIP_IF(param.expected_status != dnnl_success,
+            "Don't test for failed scenarios");
+    SKIP_IF(!gpu_dev.get(), "Non GPU doesn't support sub-devices");
+
+    auto &dev = *gpu_dev.get();
+    auto max_sub_devices
+            = dev.get_info<info::device::partition_max_sub_devices>();
+    SKIP_IF(max_sub_devices < 2, "This GPU doesn't support sub-devices");
+
+    auto sub_dev = dev.create_sub_devices<
+            info::partition_property::partition_by_affinity_domain>(
+            info::partition_affinity_domain::next_partitionable);
+    context sub_ctx(sub_dev);
+
+    catch_expected_failures(
+            [&]() {
+                for (const auto &sub_dev_i : sub_dev) {
+                    engine eng;
+                    ASSERT_NO_THROW(eng
+                            = sycl_interop::make_engine(sub_dev_i, sub_ctx));
+                }
+            },
+            param.expected_status != dnnl_success, param.expected_status);
+}
+
+#if DNNL_CPU_RUNTIME == DNNL_RUNTIME_NONE
+TEST_P(sycl_engine_test, gpu_only) {
+    device dev(cpu_selector {});
+    context ctx(dev);
+    EXPECT_ANY_THROW(sycl_interop::make_engine(dev, ctx));
+}
+#endif
 
 INSTANTIATE_TEST_SUITE_P(Simple, sycl_engine_test,
         ::testing::Values(sycl_engine_test_params {dev_kind::gpu, ctx_kind::gpu,
@@ -173,8 +240,10 @@ INSTANTIATE_TEST_SUITE_P(Simple, sycl_engine_test,
                 sycl_engine_test_params {
                         dev_kind::host, ctx_kind::host, dnnl_success}));
 
+#if DNNL_CPU_RUNTIME == DNNL_RUNTIME_SYCL
 INSTANTIATE_TEST_SUITE_P(InvalidArgs, sycl_engine_test,
         ::testing::Values(sycl_engine_test_params {dev_kind::cpu_only,
                 ctx_kind::gpu_only, dnnl_invalid_arguments}));
+#endif
 
 } // namespace dnnl

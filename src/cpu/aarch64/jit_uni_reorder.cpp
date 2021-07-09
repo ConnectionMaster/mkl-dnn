@@ -117,11 +117,11 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
         using namespace data_type;
 
         bool ok = true && p.ndims > 0
-                && utils::one_of(p.itype, f32, s32, s8, u8)
-                && utils::one_of(p.otype, f32, s32, s8, u8)
+                && utils::one_of(p.itype, f32, s32, data_type::s8, u8)
+                && utils::one_of(p.otype, f32, s32, data_type::s8, u8)
                 && utils::everyone_is(0, p.ioff, p.ooff) /* do we need this? */
                 && utils::one_of(p.beta, 0.f, 1.f) /* anything else? */
-                && simple_impl_desc_init(p, nullptr) && mayiuse(sve_512);
+                && simple_impl_desc_init(p, nullptr);
         if (!ok) return false;
 
         const ptrdiff_t max_stride = (1LL << 31) - 1;
@@ -190,17 +190,17 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
                 step_size);
     }
 
-    void tr8x8_avx2(int i_off, int o_off) {
+    void tr8x8_sve256(int i_off, int o_off) {
         using namespace data_type;
 
         const auto cvt2ps
                 = [=](const int startIdx, const int regNum, data_type_t idt) {
                       switch (idt) {
                           case f32:
-                              // do nothing
+                              /* do nothing */
                               break;
                           case s32: cvt_z_s32_f32(startIdx, regNum); break;
-                          case s8:
+                          case data_type::s8:
                               cvt_z_s8_s32(startIdx, regNum);
                               cvt_z_s32_f32(startIdx, regNum);
                               break;
@@ -210,23 +210,20 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
                               break;
                           default: assert(!"unreachable");
                       }
-
-                      for (int i = startIdx; i < startIdx + regNum; i++) {
-                          mov(ZRegS(i), P_MSB_256 / T_m, 0);
-                      }
                   };
+
         const auto cvt2odt = [=](const int startIdx, const int regNum,
                                      data_type_t odt, data_type_t idt) {
             switch (odt) {
                 case s32:
                     if (idt == f32)
                         cvt_z_f32_s32(startIdx, regNum);
-                    else if (idt == s8)
+                    else if (idt == data_type::s8)
                         cvt_z_s8_s32(startIdx, regNum);
                     else if (idt == u8)
                         cvt_z_u8_s32(startIdx, regNum);
                     break;
-                case s8:
+                case data_type::s8:
                     if (idt == f32) cvt_z_f32_s32(startIdx, regNum);
                     if (utils::one_of(idt, f32, s32))
                         cvt_z_s32_s8(startIdx, regNum);
@@ -236,7 +233,7 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
                     if (idt == f32) cvt_z_f32_s32(startIdx, regNum);
                     if (utils::one_of(idt, f32, s32))
                         cvt_z_s32_u8(startIdx, regNum);
-                    if (idt == s8) cvt_z_s8_u8(startIdx, regNum);
+                    if (idt == data_type::s8) cvt_z_s8_u8(startIdx, regNum);
                     break;
                 default: assert(!"unreachable");
             }
@@ -248,7 +245,9 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
                 || utils::one_of(f32, prb_.itype, prb_.otype);
 
         const bool need_saturation
-                = (utils::one_of(prb_.otype, u8, s8, s32) && interim_f32);
+                = (utils::one_of(prb_.otype, u8, data_type::s8, s32)
+                        && interim_f32);
+        const uint64_t sveLen = get_sve_length();
 
         add_imm(X_TMP_0, XReg(x_ptr_in_off), i_off * itype_sz, X_DEFAULT_ADDR);
         add_imm(X_TMP_1, X_TMP_0, is(0) * itype_sz, X_DEFAULT_ADDR);
@@ -285,11 +284,11 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
 #if 0
         /* Deubg code */
         index(z0.s, 0, 1);
-        mov(z0.s, P_MSB_256/T_m, 0);
+        mov(z0.s, P_NOT_256/T_m, 0);
         mov(z_tmp_vec[0].s, 16);
         for(uint32_t i=1; i<8; i++) {
           add(ZRegS{i}, ZRegS{i-1}, z_tmp_vec[0].s);
-          mov(ZRegS{i}, P_MSB_256/T_m, 0);
+          mov(ZRegS{i}, P_NOT_256/T_m, 0);
         }
 #endif
 
@@ -319,8 +318,11 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
         /* 4th turn */
         for (uint32_t i = 0; i < unroll / 2; i++) {
             ZRegB z {unroll / 2 + i};
+            ZRegB z_tmp = z_tmp_vec[unroll / 2 + i].b;
+            /* Move bit 128-255 to 0-127. */
             ext(z, z, 16);
-            ext(z_tmp_vec[unroll / 2 + i].b, z_tmp_vec[unroll / 2 + i].b, 48);
+            /* Move bit 0-127 to 128-255. */
+            ext(z_tmp, z_tmp, sveLen - 16);
         }
 
         /* 5th turn */
@@ -336,7 +338,7 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
                     interim_f32 ? f32 : prb_.itype, prb_.otype);
             for (int i = 0; i < unroll; i++)
                 saturate_f32(ZRegS(i), ymm_zero, ymm_saturation_ubound,
-                        prb_.otype, p_512);
+                        prb_.otype, p_all);
         }
 
         if (prb_.otype != f32)
@@ -376,9 +378,11 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
     bool can_do_tr8x8() {
         using namespace data_type;
 
-        return mayiuse(sve_512) && prb_.ndims >= 2
-                && ((utils::one_of(prb_.itype, u8, s8, s32, f32)
-                        && utils::one_of(prb_.otype, u8, s8, s32, f32)))
+        return get_sve_length() >= Xbyak_aarch64::util::SVE_256
+                && prb_.ndims >= 2
+                && ((utils::one_of(prb_.itype, u8, data_type::s8, s32, f32)
+                        && utils::one_of(
+                                prb_.otype, u8, data_type::s8, s32, f32)))
                 && utils::everyone_is(8, n(0), n(1))
                 && utils::everyone_is(1, os(0), is(1))
                 && prb_.scale_type == scale_type_t::NONE && prb_.beta == 0.f;
@@ -391,7 +395,7 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
         int i_off = 0, o_off = 0;
         for (int off = 0; off < len; off += step_size) {
             step(off, i_off, o_off, i_off, o_off, step_size);
-            tr8x8_avx2(i_off, o_off);
+            tr8x8_sve256(i_off, o_off);
         }
 
         return true;
@@ -453,7 +457,7 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
                         if (vlen == 64 || vlen == 32) {
                             ZRegS r(ur);
                             /* MSB side 256 bits are ignored. */
-                            scvtf(r, p_512 / T_m, r);
+                            scvtf(r, p_all / T_m, r);
                         } else if (vlen == 16) {
                             VReg4S r(ur);
                             scvtf(r, r);
@@ -463,8 +467,8 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
                         /* Out of order can be expected. */
                         if (vlen == 64 || vlen == 32) {
                             ZRegS r(ur);
-                            frinti(r, p_512 / T_m, r);
-                            fcvtzs(r, p_512 / T_m, r);
+                            frinti(r, p_all / T_m, r);
+                            fcvtzs(r, p_all / T_m, r);
                         } else if (vlen == 16) {
                             VReg4S r(ur);
                             frinti(r, r);
@@ -514,49 +518,50 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
                 = [=](const int startIdx, const int regNum, data_type_t idt) {
                       switch (idt) {
                           case f32:
-                              // do nothing
+                              /* do nothing */
                               break;
-                          case s32: cvt_z_s32_f32(startIdx, regNum); break;
-                          case s8:
-                              cvt_z_s8_s32(startIdx, regNum);
-                              cvt_z_s32_f32(startIdx, regNum);
+                          case s32: cvt_v_s32_f32(startIdx, regNum); break;
+                          case data_type::s8:
+                              cvt_v_s8_s32(startIdx, regNum);
+                              cvt_v_s32_f32(startIdx, regNum);
                               break;
                           case u8:
-                              cvt_z_u8_s32(startIdx, regNum);
-                              cvt_z_s32_f32(startIdx, regNum);
+                              cvt_v_u8_s32(startIdx, regNum);
+                              cvt_v_s32_f32(startIdx, regNum);
                               break;
                           default: assert(!"unreachable");
                       }
                   };
+
         auto cvt2odt = [=](const int startIdx, const int regNum,
                                data_type_t odt, data_type_t idt) {
             switch (odt) {
                 case s32:
                     if (idt == f32)
-                        cvt_z_f32_s32(startIdx, regNum);
-                    else if (idt == s8)
-                        cvt_z_s8_s32(startIdx, regNum);
+                        cvt_v_f32_s32(startIdx, regNum);
+                    else if (idt == data_type::s8)
+                        cvt_v_s8_s32(startIdx, regNum);
                     else if (idt == u8)
-                        cvt_z_u8_s32(startIdx, regNum);
+                        cvt_v_u8_s32(startIdx, regNum);
                     break;
-                case s8:
-                    if (idt == f32) cvt_z_f32_s32(startIdx, regNum);
+                case data_type::s8:
+                    if (idt == f32) cvt_v_f32_s32(startIdx, regNum);
                     if (idt == f32 || idt == s32)
-                        cvt_z_s32_s8(startIdx, regNum);
-                    if (idt == u8) { cvt_z_u8_s8(startIdx, regNum); }
+                        cvt_v_s32_s8(startIdx, regNum);
+                    if (idt == u8) { cvt_v_u8_s8(startIdx, regNum); }
                     break;
                 case u8:
-                    if (idt == f32) cvt_z_f32_s32(startIdx, regNum);
+                    if (idt == f32) cvt_v_f32_s32(startIdx, regNum);
                     if (idt == f32 || idt == s32)
-                        cvt_z_s32_u8(startIdx, regNum);
-                    if (idt == s8) cvt_z_s8_u8(startIdx, regNum);
+                        cvt_v_s32_u8(startIdx, regNum);
+                    if (idt == data_type::s8) cvt_v_s8_u8(startIdx, regNum);
                     break;
                 default: assert(!"unreachable");
             }
         };
 
         /* check whether loading 4 values at once is possible */
-        bool can_load_xmm = mayiuse(sve_512) && reg_unroll % 4 == 0;
+        bool can_load_xmm = reg_unroll % 4 == 0;
         for (int ur = 1; ur < reg_unroll; ++ur)
             if (i_off[ur] != i_off[ur - 1] + 1) can_load_xmm = false;
         const int load_step = can_load_xmm ? 4 : 1;
@@ -572,7 +577,8 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
                 || prb_.scale_type != scale_type_t::NONE || prb_.beta != 0.f;
 
         const bool need_saturation
-                = (utils::one_of(prb_.otype, u8, s8, s32) && interim_f32);
+                = (utils::one_of(prb_.otype, u8, data_type::s8, s32)
+                        && interim_f32);
 
         if (!can_load_xmm && can_store_xmm) {
             assert(ur_step == 4);
@@ -643,7 +649,7 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
                     for (int ur = 0; ur < reg_unroll; ur += load_step)
                         if (need_saturation)
                             saturate_f32(VReg4S(ur), xmm_zero,
-                                    xmm_saturation_ubound, prb_.otype, p_512);
+                                    xmm_saturation_ubound, prb_.otype, p_all);
 
                     for (int ur = 0; ur < reg_unroll; ur += load_step)
                         cvt2odt(ur, 1, prb_.otype,
@@ -675,7 +681,7 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
                         VReg4S v(ur);
                         VReg4S v_r(ur + r);
                         dup(VReg16B(ur + r), VReg16B(ur)[0]);
-                        ins_(VReg4S(ur + r)[0], VReg4S(ur)[r]);
+                        ins(VReg4S(ur + r)[0], VReg4S(ur)[r]);
                     }
             } else {
                 for (int ur = 0; ur < reg_unroll; ur += load_step)
@@ -723,6 +729,7 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
                         VReg4S v_dst(ur);
                         add_imm(X_TMP_0, x_ptr_scale_off, s_off[ur] * stype_sz,
                                 X_DEFAULT_ADDR);
+
                         ldr(QReg {idx}, ptr(X_TMP_0));
                         fmul(v_dst, v_dst, VReg4S {idx});
                         continue;
@@ -763,7 +770,14 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
                     assert(count <= z_tmp_vec_size);
                     /* Firstly, data is loaded. */
                     for (int i = 0; i < count; i++) {
-                        ldr(QReg(tmp_vec_idx[i]), ptr(x_tmp_vec[i]));
+
+                        if (prb_.otype == f32 || prb_.otype == s32) {
+                            ldr(QReg(tmp_vec_idx[i]), ptr(x_tmp_vec[i])); // bug
+                        } else if (prb_.otype == data_type::s8
+                                || prb_.otype == u8) {
+                            ldr(SReg(tmp_vec_idx[i]), ptr(x_tmp_vec[i])); // bug
+                        } else
+                            assert(!"unreachable");
                     }
 
                     /* Secondly, it is added. */
@@ -791,8 +805,10 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
         } else {
             /* xmm[0] <-- scale * xmm[0] */
             if (prb_.scale_type == scale_type_t::COMMON) {
-                for (int ur = 0; ur < reg_unroll; ur += ur_step)
-                    fmul(ZRegS(ur), p_lsb_32 / T_m, ZRegS(xmm_scale.getIdx()));
+                for (int ur = 0; ur < reg_unroll; ur += ur_step) {
+                    VReg4S tmp(ur);
+                    fmul(tmp, tmp, VReg4S(xmm_scale.getIdx()));
+                }
             } else if (prb_.scale_type == scale_type_t::MANY) {
                 int ur = 0;
                 int tmp_ur = 0;
@@ -807,9 +823,10 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
 
                     for (int i = 0; i < count; i++)
                         ldr(SReg(tmp_vec_idx[i]), ptr(x_tmp_vec[i]));
-                    for (int i = 0; i < count; i++)
-                        fmul(ZRegS(tmp_ur + ur_step * i), p_lsb_32 / T_m,
-                                ZRegS(tmp_vec_idx[i]));
+                    for (int i = 0; i < count; i++) {
+                        VReg4S tmp(tmp_ur + ur_step * i);
+                        fmul(tmp, tmp, VReg4S(tmp_vec_idx[i]));
+                    }
 
                     tmp_ur += ur_step * count;
                 }
@@ -850,7 +867,8 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
                         for (int i = 0; i < count; i++) {
                             if (prb_.otype == s32) {
                                 ldr(SReg(tmp_vec_idx[i]), ptr(x_tmp_vec[i]));
-                            } else if (utils::one_of(prb_.otype, s8, u8)) {
+                            } else if (utils::one_of(
+                                               prb_.otype, data_type::s8, u8)) {
                                 ldr(BReg(tmp_vec_idx[i]), ptr(x_tmp_vec[i]));
                             } else {
                                 assert(!"unsupported o_type");
@@ -872,7 +890,7 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
                     xmm_zero, xmm_saturation_ubound, reg_tmp, f32, prb_.otype);
             for (int ur = 0; ur < reg_unroll; ur += ur_step) {
                 saturate_f32(VReg4S(ur), xmm_zero, xmm_saturation_ubound,
-                        prb_.otype, p_512);
+                        prb_.otype, p_all);
             }
         }
 
@@ -1021,123 +1039,179 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
         assert(!"no implementation available");
     }
 
-    void cvt_z_s32_f32(const int startIdx, const int regNum) {
-        for (int i = startIdx; i < startIdx + regNum; i++) {
-            ZRegS tmp(i);
-            scvtf(tmp, p_lsb_256 / T_m, tmp);
-        }
+#define UNROLL_INST(inst, reg, ...) \
+    for (size_t i = startIdx; i < startIdx + regNum; i++) { \
+        reg tmp(i); \
+        inst(__VA_ARGS__); \
+    }
+#define UNROLL_INST2(inst, ...) \
+    for (size_t i = startIdx; i < startIdx + regNum; i++) \
+        inst(__VA_ARGS__);
+
+    void cvt_z_s32_f32(const size_t startIdx, const size_t regNum) {
+        UNROLL_INST(scvtf, ZRegS, tmp, p_all / T_m, tmp);
     }
 
-    void cvt_z_f32_s32(const int startIdx, const int regNum) {
-        for (int i = startIdx; i < startIdx + regNum; i++) {
-            ZRegS tmp(i);
-            frinti(tmp, p_lsb_256 / T_m, tmp);
-        }
-        for (int i = startIdx; i < startIdx + regNum; i++) {
-            ZRegS tmp(i);
-            fcvtzs(tmp, p_lsb_256 / T_m, tmp);
-        }
+    void cvt_v_s32_f32(const size_t startIdx, const size_t regNum) {
+        UNROLL_INST(scvtf, VReg4S, tmp, tmp);
     }
 
-    void cvt_z_s8_s32(const int startIdx, const int regNum) {
+    void cvt_z_f32_s32(const size_t startIdx, const size_t regNum) {
+        UNROLL_INST(frinti, ZRegS, tmp, p_all / T_m, tmp);
+        UNROLL_INST(fcvtzs, ZRegS, tmp, p_all / T_m, tmp);
+    }
+
+    void cvt_v_f32_s32(const size_t startIdx, const size_t regNum) {
+        UNROLL_INST(frinti, VReg4S, tmp, tmp);
+        UNROLL_INST(fcvtzs, VReg4S, tmp, tmp);
+    }
+
+    void cvt_z_s8_s32(const size_t startIdx, const size_t regNum) {
         cvt_z_b_s(startIdx, regNum);
-
-        for (int i = startIdx; i < startIdx + regNum; i++) {
-            ZRegS tmp(i);
-            sxtb(tmp, p_lsb_256 / T_m, tmp);
-        }
+        UNROLL_INST(sxtb, ZRegS, tmp, p_all / T_m, tmp);
     }
 
-    void cvt_z_s8_f32(const int startIdx, const int regNum) {
+    void cvt_v_s8_s32(const size_t startIdx, const size_t regNum) {
+        UNROLL_INST(sxtl, VReg, tmp.h8, tmp.b8);
+        UNROLL_INST(sxtl, VReg, tmp.s4, tmp.h4);
+    }
+
+    void cvt_z_s8_f32(const size_t startIdx, const size_t regNum) {
         cvt_z_b_s(startIdx, regNum);
         cvt_z_s32_f32(startIdx, regNum);
     }
 
-    void cvt_z_b_s(const int startIdx, const int regNum) {
-        dup(z_tmp0.b, 0);
-        for (int i = startIdx; i < startIdx + regNum; i++) {
-            ZRegB tmp(i);
-            zip1(tmp, tmp, z_tmp0.b);
-        }
-        for (int i = startIdx; i < startIdx + regNum; i++) {
-            ZRegH tmp(i);
-            zip1(tmp, tmp, z_tmp0.h);
-        }
+    void cvt_v_s8_f32(const size_t startIdx, const size_t regNum) {
+        cvt_v_b_s(startIdx, regNum);
+        cvt_v_s32_f32(startIdx, regNum);
     }
 
-    void cvt_z_u8_s32(const int startIdx, const int regNum) {
+    void cvt_z_b_s(const size_t startIdx, const size_t regNum) {
+        assert(z_tmp7.getIdx() < startIdx
+                || startIdx + regNum - 1 < z_tmp7.getIdx());
+
+        dup(z_tmp7.b, 0);
+        UNROLL_INST(zip1, ZRegB, tmp, tmp, z_tmp7.b);
+        UNROLL_INST(zip1, ZRegH, tmp, tmp, z_tmp7.h);
+    }
+
+    void cvt_v_b_s(const size_t startIdx, const size_t regNum) {
+        assert(v_tmp7.getIdx() < startIdx
+                || startIdx + regNum - 1 < v_tmp7.getIdx());
+
+        mov_imm(W_TMP_0, 0);
+        dup(v_tmp7.b16, W_TMP_0);
+        UNROLL_INST(zip1, VReg16B, tmp, tmp, v_tmp7.b16);
+        UNROLL_INST(zip1, VReg8H, tmp, tmp, v_tmp7.h8);
+    }
+
+    void cvt_z_u8_s32(const size_t startIdx, const size_t regNum) {
         cvt_z_b_s(startIdx, regNum);
-
-        for (int i = startIdx; i < startIdx + regNum; i++) {
-            ZRegS tmp(i);
-            uxtb(tmp, p_lsb_256 / T_m, tmp);
-        }
+        UNROLL_INST(uxtb, ZRegS, tmp, p_all / T_m, tmp);
     }
 
-    void cvt_z_s32_s8(const int startIdx, const int regNum) {
-        dup(z_tmp0.s, 0);
-
-        for (int i = startIdx; i < startIdx + regNum; i++) {
-            smin(ZRegS(i), 127);
-        }
-        for (int i = startIdx; i < startIdx + regNum; i++) {
-            smax(ZRegS(i), -128);
-        }
-        for (int i = startIdx; i < startIdx + regNum; i++) {
-            ZRegH z(i);
-            uzp1(z, z, z_tmp0.h);
-        }
-        for (int i = startIdx; i < startIdx + regNum; i++) {
-            ZRegB z(i);
-            uzp1(z, z, z_tmp0.b);
-        }
+    void cvt_v_u8_s32(const size_t startIdx, const size_t regNum) {
+        UNROLL_INST(uxtl, VReg, tmp.h8, tmp.b8);
+        UNROLL_INST(uxtl, VReg, tmp.s4, tmp.h4);
     }
 
-    void cvt_z_u8_s8(const int startIdx, const int regNum) {
-        for (int i = startIdx; i < startIdx + regNum; i++)
-            umin(ZRegB(i), 127);
+    void cvt_z_s32_s8(const size_t startIdx, const size_t regNum) {
+        assert(z_tmp7.getIdx() < startIdx
+                || startIdx + regNum - 1 < z_tmp7.getIdx());
+
+        dup(z_tmp7.s, 0);
+        UNROLL_INST2(smin, ZRegS(i), 127);
+        UNROLL_INST2(smax, ZRegS(i), -128);
+        UNROLL_INST(uzp1, ZRegH, tmp, tmp, z_tmp7.h);
+        UNROLL_INST(uzp1, ZRegB, tmp, tmp, z_tmp7.b);
     }
 
-    void cvt_z_u32_u8(const int startIdx, const int regNum) {
-        for (int i = startIdx; i < startIdx + regNum; i++)
-            umin(ZRegS(i), 255);
+    void cvt_v_s32_s8(const size_t startIdx, const size_t regNum) {
+        assert(v_tmp7.getIdx() < startIdx
+                || startIdx + regNum - 1 < v_tmp7.getIdx());
 
-        for (int i = startIdx; i < startIdx + regNum; i++) {
-            ZRegH z(i);
-            uzp1(z, z, z);
-        }
-        for (int i = startIdx; i < startIdx + regNum; i++) {
-            ZRegB z(i);
-            uzp1(z, z, z);
-        }
+        mov_imm(W_TMP_0, 127);
+        dup(v_tmp7.s4, W_TMP_0);
+        mov_imm(W_TMP_0, -128);
+        UNROLL_INST2(smin, VReg4S(i), VReg4S(i), v_tmp7.s4);
+        dup(v_tmp7.s4, W_TMP_0);
+        UNROLL_INST2(smax, VReg4S(i), VReg4S(i), v_tmp7.s4);
+        mov_imm(W_TMP_0, 0);
+        dup(v_tmp7.s4, W_TMP_0);
+        UNROLL_INST(uzp1, VReg8H, tmp, tmp, v_tmp7.h8);
+        UNROLL_INST(uzp1, VReg16B, tmp, tmp, v_tmp7.b16);
     }
 
-    void cvt_z_s32_u8(const int startIdx, const int regNum) {
-        dupm(z_tmp0.s, 255);
-
-        for (int i = startIdx; i < startIdx + regNum; i++)
-            smax(ZRegS(i), 0);
-
-        for (int i = startIdx; i < startIdx + regNum; i++)
-            smin(ZRegS(i), p_512 / T_m, z_tmp0.s);
-
-        for (int i = startIdx; i < startIdx + regNum; i++) {
-            ZRegH z(i);
-            uzp1(z, z, z);
-        }
-        for (int i = startIdx; i < startIdx + regNum; i++) {
-            ZRegB z(i);
-            uzp1(z, z, z);
-        }
-        for (int i = startIdx; i < startIdx + regNum; i++) {
-            mov(ZRegB(i), P_MSB_384 / T_m, 0);
-        }
+    void cvt_z_u8_s8(const size_t startIdx, const size_t regNum) {
+        UNROLL_INST2(umin, ZRegB(i), 127);
     }
 
-    void cvt_z_s8_u8(const int startIdx, const int regNum) {
-        for (int i = startIdx; i < startIdx + regNum; i++)
-            smax(ZRegB(i), 0);
+    void cvt_v_u8_s8(const size_t startIdx, const size_t regNum) {
+        assert(v_tmp7.getIdx() < startIdx
+                || startIdx + regNum - 1 < v_tmp7.getIdx());
+
+        mov_imm(W_TMP_0, 127);
+        dup(v_tmp7.b16, W_TMP_0);
+        UNROLL_INST(umin, VReg16B, tmp, tmp, v_tmp7.b16);
     }
+
+    void cvt_z_u32_u8(const size_t startIdx, const size_t regNum) {
+        UNROLL_INST2(umin, ZRegS(i), 255);
+        UNROLL_INST(uzp1, ZRegH, tmp, tmp, tmp);
+        UNROLL_INST(uzp1, ZRegB, tmp, tmp, tmp);
+    }
+
+    void cvt_v_u32_u8(const size_t startIdx, const size_t regNum) {
+        assert(v_tmp7.getIdx() < startIdx
+                || startIdx + regNum - 1 < v_tmp7.getIdx());
+
+        mov_imm(W_TMP_0, 255);
+        dup(v_tmp7.s4, W_TMP_0);
+        UNROLL_INST(umin, VReg4S, tmp, tmp, v_tmp7.s4);
+        UNROLL_INST(uzp1, VReg8H, tmp, tmp, tmp);
+        UNROLL_INST(uzp1, VReg16B, tmp, tmp, tmp);
+    }
+
+    void cvt_z_s32_u8(const size_t startIdx, const size_t regNum) {
+        assert(z_tmp7.getIdx() < startIdx
+                || startIdx + regNum - 1 < z_tmp7.getIdx());
+
+        dupm(z_tmp7.s, 255);
+        UNROLL_INST2(smax, ZRegS(i), 0);
+        UNROLL_INST2(smin, ZRegS(i), p_all / T_m, z_tmp7.s);
+        UNROLL_INST(uzp1, ZRegH, tmp, tmp, tmp);
+        UNROLL_INST(uzp1, ZRegB, tmp, tmp, tmp);
+        UNROLL_INST2(mov, ZRegB(i), P_NOT_128 / T_m, 0);
+    }
+
+    void cvt_v_s32_u8(const size_t startIdx, const size_t regNum) {
+        assert(v_tmp7.getIdx() < startIdx
+                || startIdx + regNum - 1 < v_tmp7.getIdx());
+
+        mov_imm(W_TMP_0, 0);
+        dup(v_tmp7.s4, W_TMP_0);
+        mov_imm(W_TMP_0, 255);
+        UNROLL_INST(smax, VReg4S, tmp, tmp, v_tmp7.s4);
+        dup(v_tmp7.s4, W_TMP_0);
+        UNROLL_INST(smin, VReg4S, tmp, tmp, v_tmp7.s4);
+        UNROLL_INST(uzp1, VReg8H, tmp, tmp, tmp);
+        UNROLL_INST(uzp1, VReg16B, tmp, tmp, tmp);
+    }
+
+    void cvt_z_s8_u8(const size_t startIdx, const size_t regNum) {
+        UNROLL_INST2(smax, ZRegB(i), 0);
+    }
+
+    void cvt_v_s8_u8(const size_t startIdx, const size_t regNum) {
+        assert(v_tmp7.getIdx() < startIdx
+                || startIdx + regNum - 1 < v_tmp7.getIdx());
+
+        mov_imm(W_TMP_0, 0);
+        dup(v_tmp7.b16, W_TMP_0);
+        UNROLL_INST(smax, VReg16B, tmp, tmp, v_tmp7.b16);
+    }
+#undef UNROLL_INST
+#undef UNROLL_INST
 
     jit_uni_reorder_kernel_f32_t(const desc_t &desc) : kernel_t(desc) {
         itype_sz = data_type_size(prb_.itype);
@@ -1146,14 +1220,16 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
     }
 
     void generate() override {
+        using namespace Xbyak_aarch64::util;
+        uint64_t sveLen = get_sve_length();
+
         preamble();
 #define PARAM(x) offsetof(call_param_t, x)
         if (prb_.scale_type == scale_type_t::COMMON) {
-            auto reg_ptr_scale_tmp = reg_ptr_in;
-            add_imm(X_TMP_0, abi_param1, PARAM(scale), X_TMP_1);
-            ldr(reg_ptr_scale_tmp, ptr(X_TMP_0));
-            ldr(W_TMP_0, ptr(reg_ptr_scale_tmp));
-            dup(xmm_scale, W_TMP_0);
+            add_imm(X_DEFAULT_ADDR, abi_param1, PARAM(scale), X_TMP_1);
+            ldr(X_TMP_0, ptr(X_DEFAULT_ADDR));
+            ldr(W_TMP_1, ptr(X_TMP_0));
+            dup(xmm_scale, W_TMP_1);
         } else if (prb_.scale_type == scale_type_t::MANY) {
             add_imm(X_DEFAULT_ADDR, abi_param1, PARAM(scale), X_TMP_0);
             ldr(reg_ptr_scale, ptr(X_DEFAULT_ADDR));
@@ -1167,9 +1243,11 @@ struct jit_uni_reorder_kernel_f32_t : public kernel_t, public jit_generator {
         mov(x_ptr_in_off, XReg(reg_ptr_in.getIdx()));
         mov(x_ptr_out_off, XReg(reg_ptr_out.getIdx()));
         mov(x_ptr_scale_off, XReg(reg_ptr_scale.getIdx()));
-        ptrue(p_lsb_256.b, VL32);
-        ptrue(p_lsb_32.b, VL4);
-        ptrue(p_512.b);
+
+        if (sveLen) { /* SVE is available. */
+            ptrue(p_lsb_256.b, VL32);
+            ptrue(p_all.b);
+        }
 
         if (can_do_tr8x8()) {
             dup(ymm_zero, 0);
@@ -1224,9 +1302,8 @@ private:
 
     /* Caution: Chose predicate registers not used by x64's implementation. */
     PReg p_lsb_256 = p7;
-    PReg p_512 = p6;
+    PReg p_all = p6;
     PReg p_tmp0 = p5;
-    PReg p_lsb_32 = p4;
 
     const std::vector<uint32_t> tmp_vec_idx = {20, 21, 22, 23, 24, 25, 26, 27};
     ZReg z_tmp0 = z20;
@@ -1237,6 +1314,7 @@ private:
     ZReg z_tmp5 = z25;
     ZReg z_tmp6 = z26;
     ZReg z_tmp7 = z27;
+    VReg v_tmp7 = v27;
 
     const std::vector<ZReg> z_tmp_vec
             = {z_tmp0, z_tmp1, z_tmp2, z_tmp3, z_tmp4, z_tmp5, z_tmp6, z_tmp7};
@@ -1407,230 +1485,200 @@ static void prb_thread_kernel_balance(
     }
 }
 
-struct jit_uni_reorder_t : public primitive_t {
-    struct pd_t : public cpu_reorder_pd_t {
-        using cpu_reorder_pd_t::cpu_reorder_pd_t;
-
-        DECLARE_COMMON_PD_T("jit:uni", jit_uni_reorder_t);
-
-        static status_t create(reorder_pd_t **reorder_pd, engine_t *engine,
-                const primitive_attr_t *attr, engine_t *src_engine,
-                const memory_desc_t *src_md, engine_t *dst_engine,
-                const memory_desc_t *dst_md) {
-            auto prb = tr::prb_t();
-
-            status_t prb_init_status = prb_init(prb, *src_md, *dst_md, attr);
-            if (prb_init_status != status::success) return prb_init_status;
-
-            DEBUG({
-                printf("init : ");
-                prb_dump(prb);
-            });
-            // Sort the prb array in increasing sizes of the output stride
-            prb_normalize(prb);
-            DEBUG({
-                printf("norm : ");
-                prb_dump(prb);
-            });
-            /* Combine the variables, which appear together on both
-             * sides of the reorder */
-            prb_simplify(prb);
-            DEBUG({
-                printf("smpl : ");
-                prb_dump(prb);
-            });
-
-            prb_block_for_cache(prb);
-            DEBUG({
-                printf("cache: ");
-                prb_dump(prb);
-            });
-
-            int ndims_ker_max;
-            int nthr = dnnl_get_max_threads();
-            prb_thread_kernel_balance(prb, ndims_ker_max, nthr);
-
-            tr::kernel_t::desc_t ker_desc;
-            status_t ker_init_status
-                    = tr::kernel_t::desc_init(ker_desc, prb, ndims_ker_max);
-            if (ker_init_status != status::success) return ker_init_status;
-
-            const int ndims_driver = prb.ndims - ker_desc.prb.ndims;
-            if (ndims_driver > jit_uni_reorder_t::ndims_driver_max)
-                return status::unimplemented;
-
-            DEBUG({
-                printf("ker  : ");
-                prb_dump(ker_desc.prb);
-            });
-
-            auto _pd = new pd_t(attr, src_engine->kind(), src_md,
-                    dst_engine->kind(), dst_md);
-            if (_pd == nullptr) return status::out_of_memory;
-            if (_pd->init(engine, src_engine, dst_engine) != status::success) {
-                delete _pd;
-                return status::unimplemented;
-            }
-            _pd->prb_ = prb;
-            _pd->ker_desc_ = ker_desc;
-            _pd->init_scratchpad_md();
-            _pd->nthr_ = nthr;
-            return safe_ptr_assign(*reorder_pd, _pd);
-        }
-
-        tr::prb_t prb_;
-        tr::kernel_t::desc_t ker_desc_;
-        int nthr_;
-    };
-
-    jit_uni_reorder_t(const pd_t *apd) : primitive_t(apd) {}
-
-    void omp_driver_0d(
-            int off, const char *in, char *out, const float *scale) const {
-        tr::call_param_t c {in, out, scale};
-        (*kernel_)(&c);
-    }
-
-    void omp_driver_1d(int ithr, int nthr, int off, const char *in, char *out,
-            const float *scale) const {
-        const tr::node_t *ns = pd()->prb_.nodes + off;
-        for_nd(ithr, nthr, (ptrdiff_t)ns[0].n, [&](ptrdiff_t d0) {
-            auto c = tr::call_param_t();
-            c.in = in + d0 * ns[0].is * data_type_size(pd()->prb_.itype);
-            c.out = out + d0 * ns[0].os * data_type_size(pd()->prb_.otype);
-            c.scale = scale + d0 * ns[0].ss;
-            (*kernel_)(&c);
-        });
-    }
-
-    void omp_driver_2d(int ithr, int nthr, int off, const char *in, char *out,
-            const float *scale) const {
-        const tr::node_t *ns = pd()->prb_.nodes + off;
-        for_nd(ithr, nthr, (ptrdiff_t)ns[1].n, (ptrdiff_t)ns[0].n,
-                [&](ptrdiff_t d1, ptrdiff_t d0) {
-                    auto c = tr::call_param_t();
-                    c.in = in
-                            + (d0 * ns[0].is + d1 * ns[1].is)
-                                    * data_type_size(pd()->prb_.itype);
-                    c.out = out
-                            + (d0 * ns[0].os + d1 * ns[1].os)
-                                    * data_type_size(pd()->prb_.otype);
-                    c.scale = scale + d0 * ns[0].ss + d1 * ns[1].ss;
-                    (*kernel_)(&c);
-                });
-    }
-
-    void omp_driver_3d(int ithr, int nthr, int off, const char *in, char *out,
-            const float *scale) const {
-        const tr::node_t *ns = pd()->prb_.nodes + off;
-        for_nd(ithr, nthr, (ptrdiff_t)ns[2].n, (ptrdiff_t)ns[1].n,
-                (ptrdiff_t)ns[0].n,
-                [&](ptrdiff_t d2, ptrdiff_t d1, ptrdiff_t d0) {
-                    auto c = tr::call_param_t();
-                    c.in = in
-                            + (d0 * ns[0].is + d1 * ns[1].is + d2 * ns[2].is)
-                                    * data_type_size(pd()->prb_.itype);
-                    c.out = out
-                            + (d0 * ns[0].os + d1 * ns[1].os + d2 * ns[2].os)
-                                    * data_type_size(pd()->prb_.otype);
-                    c.scale = scale + d0 * ns[0].ss + d1 * ns[1].ss
-                            + d2 * ns[2].ss;
-                    (*kernel_)(&c);
-                });
-    }
-
-    void omp_driver_4d(int ithr, int nthr, int off, const char *in, char *out,
-            const float *scale) const {
-        const tr::node_t *ns = pd()->prb_.nodes + off;
-        for_nd(ithr, nthr, (ptrdiff_t)ns[3].n, (ptrdiff_t)ns[2].n,
-                (ptrdiff_t)ns[1].n, (ptrdiff_t)ns[0].n,
-                [&](ptrdiff_t d3, ptrdiff_t d2, ptrdiff_t d1, ptrdiff_t d0) {
-                    auto c = tr::call_param_t();
-                    c.in = in
-                            + (d0 * ns[0].is + d1 * ns[1].is + d2 * ns[2].is
-                                      + d3 * ns[3].is)
-                                    * data_type_size(pd()->prb_.itype);
-                    c.out = out
-                            + (d0 * ns[0].os + d1 * ns[1].os + d2 * ns[2].os
-                                      + d3 * ns[3].os)
-                                    * data_type_size(pd()->prb_.otype);
-                    c.scale = scale + d0 * ns[0].ss + d1 * ns[1].ss
-                            + d2 * ns[2].ss + d3 * ns[3].ss;
-                    (*kernel_)(&c);
-                });
-    }
-
-    void omp_driver(const char *in, char *out, const float *scale) const {
-        in += pd()->prb_.ioff * data_type_size(pd()->prb_.itype);
-        out += pd()->prb_.ooff * data_type_size(pd()->prb_.otype);
-
-        DEBUG({
-            printf("prb : ");
-            tr::prb_dump(pd()->prb_);
-        });
-        DEBUG({
-            printf("ker : ");
-            tr::prb_dump(pd()->ker_desc_.prb);
-        });
-
-        int ndims = pd()->prb_.ndims;
-        int ndims_ker = pd()->ker_desc_.prb.ndims;
-        assert(ndims - ndims_ker <= ndims_driver_max);
-
-        if (ndims - ndims_ker == 0) {
-            omp_driver_0d(ndims_ker, in, out, scale);
-        } else {
-            parallel(pd()->nthr_, [&](const int ithr, const int nthr) {
-                switch (ndims - ndims_ker) {
-                    case 1:
-                        omp_driver_1d(ithr, nthr, ndims_ker, in, out, scale);
-                        break;
-                    case 2:
-                        omp_driver_2d(ithr, nthr, ndims_ker, in, out, scale);
-                        break;
-                    case 3:
-                        omp_driver_3d(ithr, nthr, ndims_ker, in, out, scale);
-                        break;
-                    case 4:
-                        omp_driver_4d(ithr, nthr, ndims_ker, in, out, scale);
-                        break;
-                    default: assert(!"unimplemented");
-                }
-            });
-        }
-    }
-
-    status_t init(engine_t *engine) override {
-        CHECK(safe_ptr_assign(kernel_, tr::kernel_t::create(pd()->ker_desc_)));
-        return kernel_->create_kernel();
-    }
-
-    status_t execute(const exec_ctx_t &ctx) const override {
-        status_t status = status::success;
-        auto in = CTX_IN_MEM(const char *, DNNL_ARG_FROM);
-        auto out = CTX_OUT_CLEAN_MEM(char *, DNNL_ARG_TO, status);
-        CHECK(status);
-        DEFINE_SCALES_BUFFER(scales);
-
-        omp_driver(in, out, scales);
-
-        return status::success;
-    }
-
-    enum { ndims_driver_max = 4 };
-
-private:
-    const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
-    std::unique_ptr<tr::kernel_t> kernel_;
-};
-
-status_t jit_uni_reorder_create(reorder_pd_t **reorder_pd, engine_t *engine,
-        const primitive_attr_t *attr, engine_t *src_engine,
+status_t jit_uni_reorder_t::pd_t::create(reorder_pd_t **reorder_pd,
+        engine_t *engine, const primitive_attr_t *attr, engine_t *src_engine,
         const memory_desc_t *src_md, engine_t *dst_engine,
         const memory_desc_t *dst_md) {
-    auto ret = jit_uni_reorder_t::pd_t::create(
-            reorder_pd, engine, attr, src_engine, src_md, dst_engine, dst_md);
-    return ret;
+    auto prb = tr::prb_t();
+
+    status_t prb_init_status = prb_init(prb, *src_md, *dst_md, attr);
+    if (prb_init_status != status::success) return prb_init_status;
+
+    DEBUG({
+        printf("init : ");
+        prb_dump(prb);
+    });
+    // Sort the prb array in increasing sizes of the output stride
+    prb_normalize(prb);
+    DEBUG({
+        printf("norm : ");
+        prb_dump(prb);
+    });
+    /* Combine the variables, which appear together on both
+             * sides of the reorder */
+    prb_simplify(prb);
+    DEBUG({
+        printf("smpl : ");
+        prb_dump(prb);
+    });
+
+    prb_block_for_cache(prb);
+    DEBUG({
+        printf("cache: ");
+        prb_dump(prb);
+    });
+
+    int ndims_ker_max;
+    int nthr = dnnl_get_max_threads();
+    prb_thread_kernel_balance(prb, ndims_ker_max, nthr);
+
+    tr::kernel_t::desc_t ker_desc;
+    status_t ker_init_status
+            = tr::kernel_t::desc_init(ker_desc, prb, ndims_ker_max);
+    if (ker_init_status != status::success) return ker_init_status;
+
+    const int ndims_driver = prb.ndims - ker_desc.prb.ndims;
+    if (ndims_driver > jit_uni_reorder_t::ndims_driver_max)
+        return status::unimplemented;
+
+    DEBUG({
+        printf("ker  : ");
+        prb_dump(ker_desc.prb);
+    });
+
+    auto _pd = new pd_t(
+            attr, src_engine->kind(), src_md, dst_engine->kind(), dst_md);
+    if (_pd == nullptr) return status::out_of_memory;
+    if (_pd->init(engine, src_engine, dst_engine) != status::success) {
+        delete _pd;
+        return status::unimplemented;
+    }
+    _pd->prb_ = prb;
+    _pd->ker_desc_ = ker_desc;
+    _pd->init_scratchpad_md();
+    _pd->nthr_ = nthr;
+    return safe_ptr_assign(*reorder_pd, _pd);
+}
+
+void jit_uni_reorder_t::omp_driver_0d(
+        int off, const char *in, char *out, const float *scale) const {
+    tr::call_param_t c {in, out, scale};
+    (*kernel_)(&c);
+}
+
+void jit_uni_reorder_t::omp_driver_1d(int ithr, int nthr, int off,
+        const char *in, char *out, const float *scale) const {
+    const tr::node_t *ns = pd()->prb_.nodes + off;
+    for_nd(ithr, nthr, (ptrdiff_t)ns[0].n, [&](ptrdiff_t d0) {
+        auto c = tr::call_param_t();
+        c.in = in + d0 * ns[0].is * data_type_size(pd()->prb_.itype);
+        c.out = out + d0 * ns[0].os * data_type_size(pd()->prb_.otype);
+        c.scale = scale + d0 * ns[0].ss;
+        (*kernel_)(&c);
+    });
+}
+
+void jit_uni_reorder_t::omp_driver_2d(int ithr, int nthr, int off,
+        const char *in, char *out, const float *scale) const {
+    const tr::node_t *ns = pd()->prb_.nodes + off;
+    for_nd(ithr, nthr, (ptrdiff_t)ns[1].n, (ptrdiff_t)ns[0].n,
+            [&](ptrdiff_t d1, ptrdiff_t d0) {
+                auto c = tr::call_param_t();
+                c.in = in
+                        + (d0 * ns[0].is + d1 * ns[1].is)
+                                * data_type_size(pd()->prb_.itype);
+                c.out = out
+                        + (d0 * ns[0].os + d1 * ns[1].os)
+                                * data_type_size(pd()->prb_.otype);
+                c.scale = scale + d0 * ns[0].ss + d1 * ns[1].ss;
+                (*kernel_)(&c);
+            });
+}
+
+void jit_uni_reorder_t::omp_driver_3d(int ithr, int nthr, int off,
+        const char *in, char *out, const float *scale) const {
+    const tr::node_t *ns = pd()->prb_.nodes + off;
+    for_nd(ithr, nthr, (ptrdiff_t)ns[2].n, (ptrdiff_t)ns[1].n,
+            (ptrdiff_t)ns[0].n, [&](ptrdiff_t d2, ptrdiff_t d1, ptrdiff_t d0) {
+                auto c = tr::call_param_t();
+                c.in = in
+                        + (d0 * ns[0].is + d1 * ns[1].is + d2 * ns[2].is)
+                                * data_type_size(pd()->prb_.itype);
+                c.out = out
+                        + (d0 * ns[0].os + d1 * ns[1].os + d2 * ns[2].os)
+                                * data_type_size(pd()->prb_.otype);
+                c.scale = scale + d0 * ns[0].ss + d1 * ns[1].ss + d2 * ns[2].ss;
+                (*kernel_)(&c);
+            });
+}
+
+void jit_uni_reorder_t::omp_driver_4d(int ithr, int nthr, int off,
+        const char *in, char *out, const float *scale) const {
+    const tr::node_t *ns = pd()->prb_.nodes + off;
+    for_nd(ithr, nthr, (ptrdiff_t)ns[3].n, (ptrdiff_t)ns[2].n,
+            (ptrdiff_t)ns[1].n, (ptrdiff_t)ns[0].n,
+            [&](ptrdiff_t d3, ptrdiff_t d2, ptrdiff_t d1, ptrdiff_t d0) {
+                auto c = tr::call_param_t();
+                c.in = in
+                        + (d0 * ns[0].is + d1 * ns[1].is + d2 * ns[2].is
+                                  + d3 * ns[3].is)
+                                * data_type_size(pd()->prb_.itype);
+                c.out = out
+                        + (d0 * ns[0].os + d1 * ns[1].os + d2 * ns[2].os
+                                  + d3 * ns[3].os)
+                                * data_type_size(pd()->prb_.otype);
+                c.scale = scale + d0 * ns[0].ss + d1 * ns[1].ss + d2 * ns[2].ss
+                        + d3 * ns[3].ss;
+                (*kernel_)(&c);
+            });
+}
+
+void jit_uni_reorder_t::omp_driver(
+        const char *in, char *out, const float *scale) const {
+    in += pd()->prb_.ioff * data_type_size(pd()->prb_.itype);
+    out += pd()->prb_.ooff * data_type_size(pd()->prb_.otype);
+
+    DEBUG({
+        printf("prb : ");
+        tr::prb_dump(pd()->prb_);
+    });
+    DEBUG({
+        printf("ker : ");
+        tr::prb_dump(pd()->ker_desc_.prb);
+    });
+
+    int ndims = pd()->prb_.ndims;
+    int ndims_ker = pd()->ker_desc_.prb.ndims;
+    assert(ndims - ndims_ker <= ndims_driver_max);
+
+    if (ndims - ndims_ker == 0) {
+        omp_driver_0d(ndims_ker, in, out, scale);
+    } else {
+        parallel(pd()->nthr_, [&](const int ithr, const int nthr) {
+            switch (ndims - ndims_ker) {
+                case 1:
+                    omp_driver_1d(ithr, nthr, ndims_ker, in, out, scale);
+                    break;
+                case 2:
+                    omp_driver_2d(ithr, nthr, ndims_ker, in, out, scale);
+                    break;
+                case 3:
+                    omp_driver_3d(ithr, nthr, ndims_ker, in, out, scale);
+                    break;
+                case 4:
+                    omp_driver_4d(ithr, nthr, ndims_ker, in, out, scale);
+                    break;
+                default: assert(!"unimplemented");
+            }
+        });
+    }
+}
+
+status_t jit_uni_reorder_t::init(engine_t *engine) {
+    CHECK(safe_ptr_assign(kernel_, tr::kernel_t::create(pd()->ker_desc_)));
+    return kernel_->create_kernel();
+}
+
+status_t jit_uni_reorder_t::execute(const exec_ctx_t &ctx) const {
+    status_t status = status::success;
+    auto in = CTX_IN_MEM(const char *, DNNL_ARG_FROM);
+    auto out = CTX_OUT_CLEAN_MEM(char *, DNNL_ARG_TO, status);
+    CHECK(status);
+    DEFINE_SCALES_BUFFER(scales);
+
+    omp_driver(in, out, scales);
+
+    return status::success;
 }
 
 } // namespace aarch64

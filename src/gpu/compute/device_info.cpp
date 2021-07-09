@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -15,11 +15,11 @@
 *******************************************************************************/
 
 #include <mutex>
+#include <thread>
 
 #include "gpu/compute/device_info.hpp"
 
 #include "common/verbose.hpp"
-#include "cpu/platform.hpp"
 #include "gpu/jit/binary_format.hpp"
 
 #ifdef DNNL_WITH_SYCL
@@ -36,7 +36,7 @@ uint64_t get_future_extensions(compute::gpu_arch_t gpu_arch) {
 
     uint64_t extensions = 0;
     switch (gpu_arch) {
-        case gpu_arch_t::gen12lp:
+        case gpu_arch_t::xe_lp:
             extensions |= (uint64_t)device_ext_t::intel_dot_accumulate;
             break;
         default: break;
@@ -49,7 +49,7 @@ inline gpu_arch_t str2gpu_arch(const char *str) {
     if (!strcmp(STRINGIFY(_case), str)) return gpu_arch_t::_case
 
     CASE(gen9);
-    CASE(gen12lp);
+    CASE(xe_lp);
     return gpu_arch_t::unknown;
 #undef CASE
 }
@@ -78,14 +78,21 @@ status_t device_info_t::init_attributes_common(engine_t *engine) {
     // integrated GPUs assuming that last-level cache for GPU is shared
     // with CPU.
     // Integrated GPUs share LLC with CPU which is L3 cache on CPU.
-    llc_cache_size_ = cpu::platform::get_per_core_cache_size(3)
-            * cpu::platform::get_num_cores();
+
+    // XXX: this is the only place where GPU runtime functionally depends on
+    // CPU runtime. The `llc_cache_size_` is used only in one kernel for gen9.
+    // The idea is to use approximate cache size.
+
+    // llc_cache_size_ = cpu::platform::get_per_core_cache_size(3)
+    //        * cpu::platform::get_num_cores();
+    // Assumption is that HT is likely enabled on client systems.
+    llc_cache_size_ = std::thread::hardware_concurrency() * (1 << 20);
 
     // Assume 7 threads by default
     int32_t threads_per_eu = 7;
     switch (gpu_arch_) {
         case gpu::compute::gpu_arch_t::gen9:
-        case gpu::compute::gpu_arch_t::gen12lp: threads_per_eu = 7; break;
+        case gpu::compute::gpu_arch_t::xe_lp: threads_per_eu = 7; break;
         default: break;
     }
 

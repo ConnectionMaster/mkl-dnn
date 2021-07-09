@@ -1,5 +1,5 @@
 #===============================================================================
-# Copyright 2017-2020 Intel Corporation
+# Copyright 2017-2021 Intel Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -58,8 +58,19 @@ macro(set_openmp_values_for_old_cmake)
     endif()
 endmacro()
 
-find_package(OpenMP)
-set_openmp_values_for_old_cmake()
+if(DNNL_DPCPP_HOST_COMPILER STREQUAL "DEFAULT")
+    # XXX: workaround: when -fsycl is specified the compiler doesn't define
+    # _OPENMP macro causing `find_package(OpenMP)` to fail.
+    # Use -fno-sycl option to disable SYCL. The rationale: dpcpp driver sets
+    # the -fsycl option by default so it has to be explicitly disabled.
+    set(_omp_original_cmake_cxx_flags "${CMAKE_CXX_FLAGS}")
+    string(REGEX REPLACE "-fsycl" "-fno-sycl" CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+
+    find_package(OpenMP)
+    set_openmp_values_for_old_cmake()
+
+    set(CMAKE_CXX_FLAGS "${_omp_original_cmake_cxx_flags}")
+endif()
 
 # special case for clang-cl (not recognized by cmake up to 3.17)
 if(NOT OpenMP_CXX_FOUND AND MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang" AND NOT DNNL_WITH_SYCL)
@@ -91,7 +102,12 @@ if(OpenMP_CXX_FOUND)
 endif()
 
 if(DNNL_CPU_THREADING_RUNTIME MATCHES "OMP")
-    if(OpenMP_CXX_FOUND)
+    if(DNNL_WITH_SYCL AND DNNL_DPCPP_HOST_COMPILER MATCHES "g\\+\\+")
+        # Tell DPCPP compiler to link against libgomp. By default, it links
+        # against libiomp5
+        append(CMAKE_SHARED_LINKER_FLAGS "-fopenmp=libgomp")
+        append(CMAKE_EXE_LINKER_FLAGS "-fopenmp=libgomp")
+    elseif(OpenMP_CXX_FOUND)
         if(MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
             list(APPEND EXTRA_SHARED_LIBS ${OpenMP_CXX_LIBRARIES})
         endif()

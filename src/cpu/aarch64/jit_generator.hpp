@@ -26,13 +26,15 @@
 
 #include "cpu/aarch64/cpu_isa_traits.hpp"
 
-#include "cpu/aarch64/jit_utils/jit_utils.hpp"
+#include "cpu/jit_utils/jit_utils.hpp"
 
 #define STRUCT_ALIGN(al, ...) __VA_ARGS__ __attribute__((__aligned__(al)))
 
 #define DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_name) \
     const char *name() const override { return STRINGIFY(jit_name); } \
     const char *source_file() const override { return __FILE__; }
+
+static const size_t CSIZE = sizeof(uint32_t);
 
 namespace dnnl {
 namespace impl {
@@ -45,12 +47,6 @@ namespace {
 typedef enum {
     MAX_CODE_SIZE = 256 * 1024,
 } max_code_size_t;
-
-// TODO: move this somewhere else? Although this is only used by jit kernels
-// (Roma)
-static inline int float2int(float x) {
-    return utils::bit_cast<int>(x);
-}
 
 // Callee-saved registers
 constexpr Xbyak_aarch64::Operand::Code abi_save_gpr_regs[]
@@ -123,8 +119,8 @@ public:
     const Xbyak_aarch64::PReg P_TMP_0 = p11;
     const Xbyak_aarch64::PReg P_TMP_1 = p12;
     const Xbyak_aarch64::PReg P_ALL_ZERO = p10;
-    const Xbyak_aarch64::PReg P_MSB_256 = p13;
-    const Xbyak_aarch64::PReg P_MSB_384 = p14;
+    const Xbyak_aarch64::PReg P_NOT_256 = p13;
+    const Xbyak_aarch64::PReg P_NOT_128 = p14;
     const Xbyak_aarch64::PReg P_ALL_ONE = p15;
 
     const std::vector<Xbyak_aarch64::XReg> x_tmp_vec
@@ -138,6 +134,9 @@ public:
     inline size_t get_size_of_abi_save_regs() { return size_of_abi_save_regs; }
 
     void preamble() {
+        using namespace Xbyak_aarch64::util;
+        uint64_t sveLen = get_sve_length();
+
         stp(x29, x30, pre_ptr(sp, -16));
         /* x29 is a frame pointer. */
         mov(x29, sp);
@@ -156,28 +155,38 @@ public:
                     post_ptr(x9, xreg_len * 2));
         }
 
-        if (mayiuse(sve_512)) {
+        if (sveLen) { /* SVE is available. */
             ptrue(P_ALL_ONE.b);
-            ptrue(P_MSB_384.b, Xbyak_aarch64::VL16);
-            ptrue(P_MSB_256.b, Xbyak_aarch64::VL32);
-            not_(P_MSB_384.b, P_ALL_ONE / Xbyak_aarch64::T_z, P_MSB_384.b);
-            not_(P_MSB_256.b, P_ALL_ONE / Xbyak_aarch64::T_z, P_MSB_256.b);
             pfalse(P_ALL_ZERO.b);
         }
+        if (sveLen >= SVE_256) {
+            ptrue(P_NOT_128.b, Xbyak_aarch64::VL16);
+            not_(P_NOT_128.b, P_ALL_ONE / Xbyak_aarch64::T_z, P_NOT_128.b);
+        }
+        if (sveLen >= SVE_512) {
+            ptrue(P_NOT_256.b, Xbyak_aarch64::VL32);
+            not_(P_NOT_256.b, P_ALL_ONE / Xbyak_aarch64::T_z, P_NOT_256.b);
+        }
+
         mov(X_SP, sp);
         sub_imm(X_TRANSLATOR_STACK, X_SP, translator_stack_offset, X_TMP_0);
     }
 
     void postamble() {
+        using namespace Xbyak_aarch64::util;
+        uint64_t sveLen = get_sve_length();
+
         mov(x9, sp);
-        if (mayiuse(sve_512)) {
+
+        if (sveLen) /* SVE is available. */
             eor(P_ALL_ONE.b, P_ALL_ONE / Xbyak_aarch64::T_z, P_ALL_ONE.b,
                     P_ALL_ONE.b);
-            eor(P_MSB_384.b, P_MSB_384 / Xbyak_aarch64::T_z, P_MSB_384.b,
-                    P_MSB_384.b);
-            eor(P_MSB_256.b, P_MSB_256 / Xbyak_aarch64::T_z, P_MSB_256.b,
-                    P_MSB_256.b);
-        }
+        if (sveLen >= SVE_256)
+            eor(P_NOT_128.b, P_NOT_128 / Xbyak_aarch64::T_z, P_NOT_128.b,
+                    P_NOT_128.b);
+        if (sveLen >= SVE_512)
+            eor(P_NOT_256.b, P_NOT_256 / Xbyak_aarch64::T_z, P_NOT_256.b,
+                    P_NOT_256.b);
 
         if (vreg_to_preserve) {
             ld4((v8.d - v11.d)[0], post_ptr(x9, vreg_len_preserve * 4));
@@ -206,6 +215,10 @@ public:
         L(label);
     }
 
+    void uni_clear(const Xbyak_aarch64::VReg &dst) { eor(dst.b, dst.b, dst.b); }
+
+    void uni_clear(const Xbyak_aarch64::ZReg &dst) { eor(dst.d, dst.d, dst.d); }
+
     template <typename TReg>
     void uni_fdiv(const TReg &dst, const TReg &src, const TReg &src2) {
         fdiv(dst, src, src2);
@@ -230,8 +243,7 @@ public:
         if (dstIdx == src2Idx) {
             assert(tmpIdx != srcIdx && tmpIdx != src2Idx);
 
-            mov(Xbyak_aarch64::ZRegD(tmp.getIdx()),
-                    Xbyak_aarch64::ZRegD(src2.getIdx()));
+            mov(Xbyak_aarch64::ZRegD(tmpIdx), Xbyak_aarch64::ZRegD(src2Idx));
             mov(dst, pred / Xbyak_aarch64::T_m, src);
             fdiv(dst, pred / Xbyak_aarch64::T_m, tmp);
         } else if (dstIdx == srcIdx) {
@@ -266,6 +278,26 @@ public:
                 Xbyak_aarch64::ZRegD(z3.getIdx()));
     }
 
+    void uni_ldr(
+            const Xbyak_aarch64::VReg &dst, const Xbyak_aarch64::XReg &addr) {
+        ldr(Xbyak_aarch64::QReg(dst.getIdx()), ptr(addr));
+    }
+
+    void uni_ldr(
+            const Xbyak_aarch64::ZReg &dst, const Xbyak_aarch64::XReg &addr) {
+        ldr(dst, ptr(addr));
+    }
+
+    void uni_str(
+            const Xbyak_aarch64::VReg &src, const Xbyak_aarch64::XReg &addr) {
+        str(Xbyak_aarch64::QReg(src.getIdx()), ptr(addr));
+    }
+
+    void uni_str(
+            const Xbyak_aarch64::ZReg &src, const Xbyak_aarch64::XReg &addr) {
+        str(src, ptr(addr));
+    }
+
     /*
       Saturation facility functions. enable to prepare the register
       holding the saturation upperbound and apply the saturation on
@@ -275,7 +307,10 @@ public:
     void init_saturate_f32(Vmm vmm_lbound, Vmm vmm_ubound,
             Xbyak_aarch64::XReg reg_tmp, data_type_t idt, data_type_t odt) {
         using namespace data_type;
-        if (!((idt == f32) && utils::one_of(odt, u8, s8, s32))) return;
+        bool isSVE = get_sve_length() ? true : false;
+
+        if (!((idt == f32) && utils::one_of(odt, u8, data_type::s8, s32)))
+            return;
 
         assert(IMPLICATION(
                 idt == u8, vmm_lbound.getIdx() != vmm_ubound.getIdx()));
@@ -283,7 +318,7 @@ public:
         // the conversion to int would return INT_MIN, and then proper
         // saturation will happen in store_data
         if (odt == u8) {
-            if (mayiuse(sve_512))
+            if (isSVE) /* SVE is available. */
                 dup(Xbyak_aarch64::ZRegS(vmm_lbound.getIdx()), 0);
             else if (mayiuse(asimd))
                 movi(Xbyak_aarch64::VReg4S(vmm_lbound.getIdx()), 0);
@@ -292,10 +327,14 @@ public:
         }
 
         Xbyak_aarch64::ZRegS z_tmp(vmm_ubound.getIdx());
+        Xbyak_aarch64::VReg4S v_tmp(vmm_ubound.getIdx());
         Xbyak_aarch64::WReg w_tmp(reg_tmp.getIdx());
         float saturation_ubound = types::max_value<float>(odt);
         mov_imm(w_tmp, float2int(saturation_ubound));
-        dup(z_tmp, w_tmp);
+        if (isSVE) /* SVE is available. */
+            dup(z_tmp, w_tmp);
+        else
+            dup(v_tmp, w_tmp);
     }
 
     template <typename Vmm>
@@ -307,7 +346,9 @@ public:
         // behavior (it returns INT_MIN if the f32 is out of the
         // s32 range)
         using namespace data_type;
-        if (!utils::one_of(odt, u8, s8, s32)) return;
+        bool isSVE = get_sve_length() ? true : false;
+
+        if (!utils::one_of(odt, u8, data_type::s8, s32)) return;
 
         Xbyak_aarch64::VReg4S v_tmp(vmm.getIdx());
         Xbyak_aarch64::VReg4S v_lbound(vmm_lbound.getIdx());
@@ -320,14 +361,14 @@ public:
         // signed, as cvtps2dq will return MIN_INT if the value
         // does not fit
         if (odt == u8) {
-            if (mayiuse(sve_512))
+            if (isSVE) /* SVE is available. */
                 fmax(z_tmp, p_true / Xbyak_aarch64::T_m, z_lbound);
             else if (mayiuse(asimd))
                 fmax(v_tmp, v_tmp, v_lbound);
             else
                 assert(!"unreachable");
         }
-        if (mayiuse(sve_512))
+        if (isSVE) /* SVE is available. */
             fmin(z_tmp, p_true / Xbyak_aarch64::T_m, z_ubound);
         else if (mayiuse(asimd))
             fmin(v_tmp, v_tmp, v_ubound);
@@ -340,7 +381,9 @@ public:
 public:
     jit_generator(void *code_ptr = nullptr, size_t code_size = MAX_CODE_SIZE,
             bool use_autogrow = true)
-        : Xbyak_aarch64::CodeGenerator(code_size, code_ptr) {}
+        : Xbyak_aarch64::CodeGenerator(code_size,
+                (code_ptr == nullptr && use_autogrow) ? Xbyak_aarch64::AutoGrow
+                                                      : code_ptr) {}
     virtual ~jit_generator() {}
 
     virtual const char *name() const = 0;
@@ -371,7 +414,7 @@ private:
         if (!is_initialized()) return nullptr;
         const uint8_t *code
                 = reinterpret_cast<const uint8_t *>(CodeGenerator::getCode());
-        register_jit_code(code, getSize());
+        register_jit_code(code, getSize() * CSIZE);
         return code;
     }
 

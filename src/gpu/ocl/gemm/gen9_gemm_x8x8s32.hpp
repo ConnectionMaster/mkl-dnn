@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -36,6 +36,7 @@ namespace gpu {
 namespace ocl {
 
 struct gen9_gemm_x8x8s32_t : public gpu_gemm_t {
+    using gpu_gemm_t::gpu_gemm_t;
     enum class type { no_copy };
 
     struct pd_t : public gpu_gemm_pd_t {
@@ -59,14 +60,15 @@ struct gen9_gemm_x8x8s32_t : public gpu_gemm_t {
             bool ok = set_default_formats();
             if (!ok) return status::unimplemented;
 
-            const auto d = desc();
+            const auto &d = desc();
             // LIMITATIONS:
+            // - blocked data formats not supported
             // - batch is not supported
             // - runtime dims are not supported
             // - bias is not supported
             // - runtime zero points are supported for dst only
             // - attribute zero points are supported for src and weights only
-            bool limits_ok = d->batch() == 1
+            bool limits_ok = !has_blocks() && d->batch() == 1
                     && !utils::one_of(DNNL_RUNTIME_DIM_VAL, d->m(), d->n(),
                             d->k(), d->lda(), d->ldb(), d->ldc())
                     && d->bias_type() == data_type::undef;
@@ -91,7 +93,8 @@ struct gen9_gemm_x8x8s32_t : public gpu_gemm_t {
                                     || attr()->post_ops_.find(sum) != -1)
                     && IMPLICATION(attr()->post_ops_.len() == 2,
                             attr()->post_ops_.find(sum) == 0
-                                    && attr()->post_ops_.find(eltwise) == 1);
+                                    && attr()->post_ops_.find(eltwise) == 1)
+                    && attr_.set_default_formats(dst_md(0)) == status::success;
             if (!ok) return status::unimplemented;
             init_scratchpad();
             attr_info = attr_info_t::create(attr());
@@ -150,8 +153,6 @@ struct gen9_gemm_x8x8s32_t : public gpu_gemm_t {
         return status::invalid_arguments;
     }
 
-    gen9_gemm_x8x8s32_t(const pd_t *apd) : gpu_gemm_t(apd) {}
-
     status_t init_nocopy(engine_t *engine) {
         const char *kernel_name = nullptr;
 
@@ -173,8 +174,9 @@ struct gen9_gemm_x8x8s32_t : public gpu_gemm_t {
 
         auto status = gen9_gemm_x8x8s32_kernel_t::init_kernel_ctx(kernel_ctx,
                 pd()->desc()->transa(), pd()->desc()->transb(), fixed_c,
-                column_c, row_c, pd()->attr_info, pd()->desc()->a_type(),
-                pd()->desc()->b_type(), pd()->desc()->c_type());
+                column_c, row_c, pd()->attr_info, pd()->attr()->post_ops_,
+                pd()->desc()->a_type(), pd()->desc()->b_type(),
+                pd()->desc()->c_type());
         if (status != status::success) return status;
 
         create_kernel(
@@ -185,7 +187,8 @@ struct gen9_gemm_x8x8s32_t : public gpu_gemm_t {
         kernel_name = "gen9_gemm_scale_x8x8s32";
 
         status = gen9_gemm_scale_x8x8s32_kernel_t::init_kernel_ctx(kernel_ctx,
-                pd()->attr_info, pd()->desc()->a_type(), pd()->desc()->b_type(),
+                pd()->attr_info, pd()->attr()->post_ops_,
+                pd()->desc()->a_type(), pd()->desc()->b_type(),
                 pd()->desc()->c_type());
         if (status != status::success) return status;
 

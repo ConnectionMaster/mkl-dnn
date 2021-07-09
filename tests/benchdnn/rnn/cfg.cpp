@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2018-2020 Intel Corporation
+* Copyright 2018-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -50,7 +50,10 @@ const int f32_max_exact = 1 << 24;
 dt_conf_t::entry_t F32_ENTRY {dnnl_f32, -f32_max_exact, f32_max_exact, MIN_F32,
         MAX_F32, MEAN_F32, STDDEV_F32, EPS_F32};
 
+#define UNUSED_REG_VAR(name) UNUSED(__reg_##name)
+
 CFG(f32) {
+    UNUSED_REG_VAR(f32);
     return F32_ENTRY;
 }
 
@@ -66,6 +69,7 @@ dt_conf_t::entry_t BF16_ENTRY_F32 {dnnl_f32, -f32_max_exact, f32_max_exact,
         MIN_F32, MAX_F32, MEAN_F32, STDDEV_F32, EPS_BF16};
 
 CFG(bf16) {
+    UNUSED_REG_VAR(bf16);
     CASE(SRC_LAYER, BF16_ENTRY_BF16);
     CASE(SRC_ITER, BF16_ENTRY_BF16);
     CASE(WEIGHTS_LAYER, BF16_ENTRY_BF16);
@@ -81,6 +85,7 @@ dt_conf_t::entry_t F16_ENTRY {dnnl_f16, -f16_max_exact, f16_max_exact, 0.0f,
         0.999999f, 0.5f, 0.01f, epsilon_dt(dnnl_f16)};
 
 CFG(f16) {
+    UNUSED_REG_VAR(f16);
     return F16_ENTRY;
 }
 
@@ -95,19 +100,30 @@ CFG(f16) {
 
 #define MIN_S8 (-64.f)
 #define MAX_S8 64.f
-#define MEAN_S8 0.f
+#define MEAN_S8 8.f
 #define STDDEV_S8 32.f
+#define MEAN_WEIGHT_S8 0.f
 
 dt_conf_t::entry_t U8_ENTRY_U8_EXACT {
         dnnl_u8, 0, UINT8_MAX, MIN_U8, MAX_U8, MEAN_U8, STDDEV_U8, 0.f};
 dt_conf_t::entry_t U8_ENTRY_U8 {
         dnnl_u8, 0, UINT8_MAX, MIN_U8, MAX_U8, MEAN_U8, STDDEV_U8, EPS_U8};
 dt_conf_t::entry_t U8_ENTRY_S8 {dnnl_s8, INT8_MIN, INT8_MAX, MIN_S8, MAX_S8,
-        MEAN_S8, STDDEV_S8, EPS_S8};
+        MEAN_WEIGHT_S8, STDDEV_S8, EPS_S8};
 dt_conf_t::entry_t U8_ENTRY_F32 {dnnl_f32, -f32_max_exact, f32_max_exact,
         MIN_F32, MAX_F32, MEAN_F32, STDDEV_F32, EPS_F32};
 
+dt_conf_t::entry_t S8_ENTRY_S8_EXACT {
+        dnnl_s8, INT8_MIN, INT8_MAX, 0, MAX_S8, MEAN_S8, STDDEV_S8, 0.f};
+dt_conf_t::entry_t S8_ENTRY_S8 {
+        dnnl_s8, INT8_MIN, INT8_MAX, 0, MAX_S8, MEAN_S8, STDDEV_S8, EPS_S8};
+dt_conf_t::entry_t S8_ENTRY_WEIGHT_S8 {dnnl_s8, INT8_MIN, INT8_MAX, MIN_S8,
+        MAX_S8, MEAN_WEIGHT_S8, STDDEV_S8, EPS_S8};
+dt_conf_t::entry_t S8_ENTRY_F32 {dnnl_f32, -f32_max_exact, f32_max_exact,
+        MIN_F32, MAX_F32, MEAN_F32, STDDEV_F32, EPS_F32};
+
 CFG(u8u8u8u8) {
+    UNUSED_REG_VAR(u8u8u8u8);
     CASE(SRC_LAYER, U8_ENTRY_U8);
     CASE(SRC_ITER, U8_ENTRY_U8);
     CASE(SRC_ITER_C, U8_ENTRY_F32);
@@ -123,6 +139,7 @@ CFG(u8u8u8u8) {
 }
 
 CFG(u8u8u8f32) {
+    UNUSED_REG_VAR(u8u8u8f32);
     CASE(SRC_LAYER, U8_ENTRY_U8);
     CASE(SRC_ITER, U8_ENTRY_U8);
     CASE(SRC_ITER_C, U8_ENTRY_F32);
@@ -138,6 +155,7 @@ CFG(u8u8u8f32) {
 }
 
 CFG(f32u8f32u8) {
+    UNUSED_REG_VAR(f32u8f32u8);
     CASE(SRC_LAYER, U8_ENTRY_U8);
     CASE(SRC_ITER, U8_ENTRY_F32);
     CASE(SRC_ITER_C, U8_ENTRY_F32);
@@ -153,6 +171,7 @@ CFG(f32u8f32u8) {
 }
 
 CFG(f32u8f32f32) {
+    UNUSED_REG_VAR(f32u8f32f32);
     CASE(SRC_LAYER, U8_ENTRY_U8);
     CASE(SRC_ITER, U8_ENTRY_F32);
     CASE(SRC_ITER_C, U8_ENTRY_F32);
@@ -164,6 +183,70 @@ CFG(f32u8f32f32) {
     CASE(DST_ITER, U8_ENTRY_F32);
     CASE(DST_ITER_C, U8_ENTRY_F32);
     CASE(DST_LAYER, U8_ENTRY_F32);
+    END_LIST;
+}
+
+CFG(s8s8s8s8) {
+    UNUSED_REG_VAR(s8s8s8s8);
+    CASE(SRC_LAYER, S8_ENTRY_S8);
+    CASE(SRC_ITER, S8_ENTRY_S8);
+    CASE(SRC_ITER_C, S8_ENTRY_F32);
+    CASE(WEIGHTS_LAYER, S8_ENTRY_WEIGHT_S8);
+    CASE(WEIGHTS_ITER, S8_ENTRY_WEIGHT_S8);
+    CASE(WEIGHTS_PEEPHOLE, S8_ENTRY_F32);
+    CASE(WEIGHTS_PROJECTION, S8_ENTRY_WEIGHT_S8);
+    CASE(BIAS, S8_ENTRY_F32);
+    CASE(DST_ITER, S8_ENTRY_S8);
+    CASE(DST_ITER_C, S8_ENTRY_F32);
+    CASE(DST_LAYER, S8_ENTRY_S8_EXACT);
+    END_LIST;
+}
+
+CFG(s8s8s8f32) {
+    UNUSED_REG_VAR(s8s8s8f32);
+    CASE(SRC_LAYER, S8_ENTRY_S8);
+    CASE(SRC_ITER, S8_ENTRY_S8);
+    CASE(SRC_ITER_C, S8_ENTRY_F32);
+    CASE(WEIGHTS_LAYER, S8_ENTRY_WEIGHT_S8);
+    CASE(WEIGHTS_ITER, S8_ENTRY_WEIGHT_S8);
+    CASE(WEIGHTS_PEEPHOLE, S8_ENTRY_F32);
+    CASE(WEIGHTS_PROJECTION, S8_ENTRY_WEIGHT_S8);
+    CASE(BIAS, S8_ENTRY_F32);
+    CASE(DST_ITER, S8_ENTRY_S8);
+    CASE(DST_ITER_C, S8_ENTRY_F32);
+    CASE(DST_LAYER, S8_ENTRY_F32);
+    END_LIST;
+}
+
+CFG(f32s8f32s8) {
+    UNUSED_REG_VAR(f32s8f32s8);
+    CASE(SRC_LAYER, S8_ENTRY_S8);
+    CASE(SRC_ITER, S8_ENTRY_F32);
+    CASE(SRC_ITER_C, S8_ENTRY_F32);
+    CASE(WEIGHTS_LAYER, S8_ENTRY_WEIGHT_S8);
+    CASE(WEIGHTS_ITER, S8_ENTRY_WEIGHT_S8);
+    CASE(WEIGHTS_PEEPHOLE, S8_ENTRY_F32);
+    CASE(WEIGHTS_PROJECTION, S8_ENTRY_WEIGHT_S8);
+    CASE(BIAS, S8_ENTRY_F32);
+    CASE(DST_ITER, S8_ENTRY_F32);
+    CASE(DST_ITER_C, S8_ENTRY_F32);
+    CASE(DST_LAYER, S8_ENTRY_S8_EXACT);
+    END_LIST;
+}
+
+CFG(f32s8f32f32) {
+    UNUSED_REG_VAR(f32s8f32f32);
+    CASE(SRC_LAYER, S8_ENTRY_S8);
+    CASE(SRC_ITER, S8_ENTRY_F32);
+    CASE(SRC_ITER_C, S8_ENTRY_F32);
+    CASE(WEIGHTS_LAYER, S8_ENTRY_WEIGHT_S8);
+    CASE(WEIGHTS_ITER, S8_ENTRY_WEIGHT_S8);
+    CASE(WEIGHTS_PEEPHOLE, S8_ENTRY_F32);
+    CASE(WEIGHTS_PROJECTION, S8_ENTRY_WEIGHT_S8);
+    CASE(BIAS, S8_ENTRY_F32);
+    CASE(DST_ITER, S8_ENTRY_F32);
+    CASE(DST_ITER_C, S8_ENTRY_F32);
+    CASE(DST_LAYER, S8_ENTRY_F32);
     END_LIST;
 }
 

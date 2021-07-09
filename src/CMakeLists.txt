@@ -23,10 +23,10 @@ file(GLOB HEADERS_SUBDIR
     ${CMAKE_CURRENT_SOURCE_DIR}/../include/oneapi/dnnl/*.h
     ${CMAKE_CURRENT_SOURCE_DIR}/../include/oneapi/dnnl/*.hpp
     )
-include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+include_directories_with_host_compiler(${CMAKE_CURRENT_SOURCE_DIR})
 
 if (DNNL_LIBRARY_TYPE STREQUAL "SHARED")
-    add_definitions(-DDNNL_DLL_EXPORTS)
+    add_definitions_with_host_compiler(-DDNNL_DLL_EXPORTS)
 endif()
 
 # propagate SRC specific flags
@@ -41,18 +41,21 @@ append(CMAKE_CXX_FLAGS "${CMAKE_CCXX_NOWARN_FLAGS}")
 append(CMAKE_C_FLAGS "${CMAKE_CCXX_SANITIZER_FLAGS}")
 append(CMAKE_CXX_FLAGS "${CMAKE_CCXX_SANITIZER_FLAGS}")
 
+append_host_compiler_options(CMAKE_CXX_FLAGS "${DPCPP_SRC_CXX_FLAGS}")
+append_host_compiler_options(CMAKE_CXX_FLAGS "${DPCPP_CXX_NOWARN_FLAGS}")
+
 if(NOT DNNL_VERBOSE)
-    add_definitions(-DDISABLE_VERBOSE)
+    add_definitions_with_host_compiler(-DDISABLE_VERBOSE)
 endif()
 
 if(DNNL_ENABLE_CONCURRENT_EXEC)
-    add_definitions(-DDNNL_ENABLE_CONCURRENT_EXEC)
+    add_definitions_with_host_compiler(-DDNNL_ENABLE_CONCURRENT_EXEC)
 endif()
 
 if(DNNL_ENABLE_PRIMITIVE_CACHE)
     message(STATUS "Primitive cache is enabled")
 else()
-    add_definitions(-DDNNL_DISABLE_PRIMITIVE_CACHE)
+    add_definitions_with_host_compiler(-DDNNL_DISABLE_PRIMITIVE_CACHE)
     message(STATUS "Primitive cache is disabled")
 endif()
 
@@ -63,36 +66,40 @@ if(DNNL_ENABLE_JIT_PROFILING OR DNNL_ENABLE_ITT_TASKS)
     endif()
 endif()
 
-if(DNNL_ENABLE_ITT_TASKS)
+
+if(DNNL_ENABLE_ITT_TASKS AND NOT DNNL_CPU_RUNTIME STREQUAL "NONE")
     # Only supported for certain architectures (see src/common/CMakeLists.txt)
     if(DNNL_TARGET_ARCH STREQUAL "AARCH64" OR DNNL_TARGET_ARCH STREQUAL "X64")
-        add_definitions(-DDNNL_ENABLE_ITT_TASKS)
+        add_definitions_with_host_compiler(-DDNNL_ENABLE_ITT_TASKS)
     endif()
 endif()
 
 if(DNNL_ENABLE_MAX_CPU_ISA)
-    add_definitions(-DDNNL_ENABLE_MAX_CPU_ISA)
+    add_definitions_with_host_compiler(-DDNNL_ENABLE_MAX_CPU_ISA)
 endif()
 
 if(DNNL_ENABLE_CPU_ISA_HINTS)
-    add_definitions(-DDNNL_ENABLE_CPU_ISA_HINTS)
+    add_definitions_with_host_compiler(-DDNNL_ENABLE_CPU_ISA_HINTS)
 endif()
 
 if(WIN32)
-    add_definitions(-D_WIN)
-    add_definitions(-DNOMINMAX)
+    add_definitions_with_host_compiler(-D_WIN)
+    add_definitions_with_host_compiler(-DNOMINMAX)
 endif()
 
 # Windows does not support weak/strong symbols and no guarrantees by the linker
 # for out_of_memory testing to work. Not tested on macOS
 if(UNIX)
     if(DNNL_ENABLE_MEM_DEBUG)
-        add_definitions(-DDNNL_ENABLE_MEM_DEBUG)
+        add_definitions_with_host_compiler(-DDNNL_ENABLE_MEM_DEBUG)
     endif()
 endif()
 
 add_subdirectory(common)
-add_subdirectory(cpu)
+
+if(NOT DNNL_CPU_RUNTIME STREQUAL "NONE")
+    add_subdirectory(cpu)
+endif()
 
 if(NOT DNNL_GPU_RUNTIME STREQUAL "NONE")
     add_subdirectory(gpu)
@@ -205,11 +212,17 @@ else()
         else()
             set(compat_link "${CMAKE_CURRENT_BINARY_DIR}/libmkldnn${ext_and_ver}")
         endif()
-        add_custom_command(OUTPUT ${compat_link}
-            # to make the next command work fine
-            COMMAND ${CMAKE_COMMAND} -E remove -f ${compat_link}
-            COMMAND ${CMAKE_COMMAND} -E create_symlink libdnnl${ext_and_ver} ${compat_link}
-            DEPENDS ${LIB_NAME})
+        if(CMAKE_HOST_SYSTEM_NAME STREQUAL Windows)               
+            add_custom_command(OUTPUT ${compat_link}
+                COMMAND ${CMAKE_COMMAND} -E copy libdnnl${ext_and_ver} ${compat_link}
+                DEPENDS ${LIB_NAME})
+        else()
+            add_custom_command(OUTPUT ${compat_link}
+                # to make the next command work fine
+                COMMAND ${CMAKE_COMMAND} -E remove -f ${compat_link}
+                COMMAND ${CMAKE_COMMAND} -E create_symlink libdnnl${ext_and_ver} ${compat_link}
+                DEPENDS ${LIB_NAME})
+        endif()
         add_custom_target(compat_libs${ver} ALL DEPENDS ${compat_link})
         install(FILES ${compat_link} DESTINATION ${CMAKE_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR})
     endforeach()

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -33,12 +33,16 @@ enum class broadcasting_strategy_t {
     scalar, // [1, 1, 1, 1, 1] // Channel_shared
     per_oc, // [1, c, 1, 1, 1] // Channel-wise
     per_oc_spatial, // [1, c, 1, 1, 1] specific case for binary kernel nchw format
+    per_mb_spatial, // [n, 1, d, h, w] // Broadcast only channel
     shared_axes, // [n, 1, d, h, 1] // General case broadcast (any combination)
     no_broadcast, // [n, c, d, h, w]
     unsupported
 };
 
 using bcast_set_t = std::set<broadcasting_strategy_t>;
+
+static const bcast_set_t default_strategies {broadcasting_strategy_t::scalar,
+        broadcasting_strategy_t::per_oc, broadcasting_strategy_t::no_broadcast};
 
 output_dims_t make_output_dims(const memory_desc_wrapper &dst_d);
 

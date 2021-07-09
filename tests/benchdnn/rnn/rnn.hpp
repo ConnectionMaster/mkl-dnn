@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2018-2020 Intel Corporation
+* Copyright 2018-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -191,7 +191,11 @@ struct dt_conf_t {
     virtual const entry_t &operator[](data_kind_t kind) const = 0;
 
     const std::string &str() const { return str_; }
-    bool is_int8() const { return operator[](SRC_LAYER).dt == dnnl_u8; }
+    bool is_int8() const {
+        return operator[](SRC_LAYER).dt == dnnl_u8
+                || operator[](SRC_LAYER).dt == dnnl_s8;
+    }
+    bool is_s8() const { return operator[](SRC_LAYER).dt == dnnl_s8; }
 
     static const dt_conf_t &create(const std::string &str);
 
@@ -293,6 +297,7 @@ struct prb_t : public desc_t {
                 break;
             default: assert(!"unsupported scaling policy");
         }
+        wei_scales = (float *)zmalloc(sizeof(float) * wei_nscales, 64);
 
         if (with_projection) {
             switch (wei_proj_scales_policy) {
@@ -306,11 +311,10 @@ struct prb_t : public desc_t {
                     break;
                 default: assert(!"unsupported scaling policy");
             }
+            wei_proj_scales
+                    = (float *)zmalloc(sizeof(float) * wei_proj_nscales, 64);
         }
 
-        wei_scales = (float *)zmalloc(sizeof(float) * wei_nscales, 64);
-        wei_proj_scales
-                = (float *)zmalloc(sizeof(float) * wei_proj_nscales, 64);
         set_qparams(-1., 1.);
     }
     ~prb_t() {
@@ -361,7 +365,11 @@ struct prb_t : public desc_t {
         return 0;
     }
 
-    bool is_int8() const { return cfg[SRC_LAYER].dt == dnnl_u8; }
+    bool is_int8() const {
+        return cfg[SRC_LAYER].dt == dnnl_u8 || cfg[SRC_LAYER].dt == dnnl_s8;
+    }
+    bool is_u8() const { return cfg[SRC_LAYER].dt == dnnl_u8; }
+    bool is_s8() const { return cfg[SRC_LAYER].dt == dnnl_s8; }
     bool is_lstm_peephole() const { return with_peephole; }
     bool is_lstm_projection() const { return with_projection; }
 

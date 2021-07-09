@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -29,6 +29,7 @@ namespace gpu {
 namespace ocl {
 
 struct ref_gemm_t : public gpu_gemm_t {
+    using gpu_gemm_t::gpu_gemm_t;
     struct pd_t : public gpu_gemm_pd_t {
         using gpu_gemm_pd_t::gpu_gemm_pd_t;
 
@@ -48,6 +49,9 @@ struct ref_gemm_t : public gpu_gemm_t {
             const auto bia_dt = desc()->bias_type();
 
             ok = IMPLICATION(acc_dt == s32, attr()->zero_points_.common())
+                    && !has_blocks() && desc()->c_desc.ndims <= 3
+                    && IMPLICATION(desc()->is_batched(),
+                            desc()->a_desc.dims[0] == desc()->b_desc.dims[0])
                     && IMPLICATION(acc_dt != s32,
                             attr()->zero_points_.has_default_values())
                     && attr()->has_default_values(smask_t::oscale_runtime
@@ -109,8 +113,6 @@ struct ref_gemm_t : public gpu_gemm_t {
         attr_info_t attr_info = {};
     };
 
-    ref_gemm_t(const pd_t *apd) : gpu_gemm_t(apd) {}
-
     status_t init(engine_t *engine) override {
         compute::kernel_ctx_t kernel_ctx;
 
@@ -120,7 +122,7 @@ struct ref_gemm_t : public gpu_gemm_t {
 
         const auto d = pd()->desc();
         kernel_ctx.set_data_type(d->c_type());
-        def_attr_info(kernel_ctx, pd()->attr_info);
+        def_attr_info(kernel_ctx, pd()->attr_info, pd()->attr()->post_ops_);
 
         const auto bias_type = d->bias_type() != data_type::undef
                 ? d->bias_type()

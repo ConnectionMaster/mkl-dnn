@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2018-2020 Intel Corporation
+* Copyright 2018-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -17,6 +17,7 @@
 #ifndef CPU_X64_JIT_AVX512_CORE_X8S8S32X_DECONVOLUTION_HPP
 #define CPU_X64_JIT_AVX512_CORE_X8S8S32X_DECONVOLUTION_HPP
 
+#include <vector>
 #include "common/c_types_map.hpp"
 #include "common/dnnl_thread.hpp"
 #include "common/memory.hpp"
@@ -41,6 +42,31 @@ typedef enum {
     last_sp_block = 0x4U,
 } ker_block_t;
 
+struct ur_w_blks_params_t {
+    struct single_ur_w_blk_params_t {
+        single_ur_w_blk_params_t(
+                int l_overflow, int r_overflow, bool process_sp_carefully)
+            : l_overflow(l_overflow)
+            , r_overflow(r_overflow)
+            , process_sp_carefully(process_sp_carefully) {}
+
+        // l_overflow - no. of spatial elements of weights standing out of
+        // src spatial when computing the 1st output pixel in the current blk
+        int l_overflow;
+        // r_overflow - no. of spatial elements of weights standing out of
+        // src spatial when computing the lst output pixel in the current blk
+        int r_overflow;
+        // process_sp_carefully - indicates if loading the last src sp
+        // for computation of the last dst sp of the block can't be done
+        // by fetching 4 src sp at once
+        bool process_sp_carefully;
+    };
+    std::vector<single_ur_w_blk_params_t> blks_params;
+    int num_pre_blks; // num of blocks with l_overflow>0
+    int num_post_blks; // num of blocks with r_overflow>0 or that need to be
+            // processed carefully
+};
+
 template <typename Vmm>
 struct jit_avx512_core_x8s8s32x_deconv_fwd_kernel : public jit_generator {
     DECLARE_CPU_JIT_AUX_FUNCTIONS(jit_avx512_core_x8s8s32x_deconv_fwd_ker_t);
@@ -53,7 +79,7 @@ struct jit_avx512_core_x8s8s32x_deconv_fwd_kernel : public jit_generator {
     const primitive_attr_t &attr_;
 
 private:
-    std::unique_ptr<injector::jit_uni_postops_injector_t<avx512_core>>
+    std::unique_ptr<injector::jit_uni_postops_injector_t<avx512_core, Vmm>>
             postops_injector_;
 
     const int ic_sub_step = 4;
@@ -140,6 +166,9 @@ private:
             ker_block_t last_ic_block_flag, bool h_padded = false);
     void kh_loop(int ur_w, int pad_l, int pad_r, ker_block_t last_ker_block);
     void icb_loop(int ur_w, int pad_l, int pad_r, bool last_block);
+
+    ur_w_blks_params_t get_ur_w_blks_params();
+
     void generate() override;
     void cvt2ps(data_type_t type_in, Vmm vmm_in, const Xbyak::Operand &op,
             bool mask_flag);
@@ -175,14 +204,14 @@ struct _jit_avx512_core_x8s8s32x_deconv_fwd_kernel {
 
     void operator()(const jit_deconv_call_s *p) const { (*kernel_)(p); }
 
-    static bool post_ops_ok(jit_conv_conf_t &jcp, const primitive_attr_t &attr,
+    static bool post_ops_ok(jit_conv_conf_t &jcp, primitive_attr_t &attr,
             const memory_desc_wrapper &dst_d);
 
     static status_t init_conf(jit_conv_conf_t &jcp,
             const deconvolution_desc_t &cd, memory_desc_t &src_md,
             memory_desc_t &weights_md, memory_desc_t &dst_md,
             const bool with_bias, memory_desc_t &bias_md,
-            const primitive_attr_t &attr, int nthreads);
+            primitive_attr_t &attr, int nthreads);
 
     static void init_scratchpad(memory_tracking::registrar_t &scratchpad,
             const jit_conv_conf_t &jcp, const primitive_attr_t &attr);
@@ -218,13 +247,9 @@ struct _jit_avx512_core_x8s8s32x_deconvolution_fwd_t : public primitive_t {
                             | primitive_attr_t::skip_mask_t::post_ops);
             if (!ok) return status::unimplemented;
 
-            status_t status
-                    = _jit_avx512_core_x8s8s32x_deconv_fwd_kernel::init_conf(
-                            jcp_, *desc(), src_md_, weights_md_, dst_md_,
-                            with_bias(), bias_md_, *attr(),
-                            dnnl_get_max_threads());
-
-            if (status != status::success) return status;
+            CHECK(_jit_avx512_core_x8s8s32x_deconv_fwd_kernel::init_conf(jcp_,
+                    *desc(), src_md_, weights_md_, dst_md_, with_bias(),
+                    bias_md_, attr_, dnnl_get_max_threads()));
 
             auto scratchpad = scratchpad_registry().registrar();
             _jit_avx512_core_x8s8s32x_deconv_fwd_kernel::init_scratchpad(

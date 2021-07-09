@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2018-2020 Intel Corporation
+* Copyright 2018-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -74,8 +74,11 @@ status_t gemm_x8s8s32x_inner_product_fwd_t<src_type, dst_type>::execute_forward(
         parallel(force_sequential ? 1 : 0, [&](int ithr, int nthr) {
             size_t start, end;
             balance211((size_t)(OC * MB), nthr, ithr, start, end);
-            (*pp_kernel_)(dst, acc, bias, scales, start, end, 0, 0, nullptr,
-                    post_ops_binary_rhs_arg_vec.data(), dst, ctx,
+            const size_t dst_logical_off = start;
+            const size_t dim1_off = start % OC;
+            (*pp_kernel_)(dst, acc, bias, scales, start, dst_logical_off,
+                    dim1_off, end, 0, 0, nullptr,
+                    post_ops_binary_rhs_arg_vec.data(), dst, 0, ctx,
                     *pd()->dst_md());
         });
     }

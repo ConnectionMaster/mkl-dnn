@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2016-2020 Intel Corporation
+* Copyright 2016-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -122,7 +122,7 @@ struct memory_desc_wrapper : public c_compatible {
         using namespace memory_extra_flags;
 
         auto calculate_size = [=](int cmask, size_t buff_data_size) {
-            assert(cmask == 1 || cmask == 3 || cmask == 13 || cmask == 27);
+            assert(utils::one_of(cmask, 1, 2, 3, 13, 27));
             dim_t prod = 1;
             for (int d = 0; d < ndims(); ++d)
                 if (cmask & (1 << d)) prod *= padded_dims()[d];
@@ -181,11 +181,28 @@ struct memory_desc_wrapper : public c_compatible {
         }
     }
 
+    /** returns the true if some dim is broadcasted (stride == 0) */
+    bool has_broadcast() const {
+        const auto &bd = blocking_desc();
+        for (int d = 0; d < ndims(); d++)
+            if (bd.strides[d] == 0) return true;
+        return false;
+    }
+
+    /** returns true if number of non unit dims is <= `n`. */
+    bool count_non_unit_dims(int n) const {
+        int non_unit_dims = 0;
+        for (int d = 0; d < ndims(); d++) {
+            if (dims()[d] != 1) non_unit_dims++;
+        }
+        return non_unit_dims <= n;
+    }
+
     /** returns true if data is dense in memory */
     bool is_dense(bool with_padding = false) const {
         if (utils::one_of(format_kind(), format_kind::undef, format_kind::any))
             return false;
-        if (has_runtime_dims_or_strides()) return false;
+        if (has_runtime_dims_or_strides() || has_broadcast()) return false;
         return nelems(with_padding) * data_type_size() == size();
     }
 

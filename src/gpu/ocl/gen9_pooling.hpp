@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -32,6 +32,7 @@ namespace gpu {
 namespace ocl {
 
 struct gen9_pooling_fwd_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_pooling_fwd_pd_t {
         pd_t(const pooling_v2_desc_t *adesc, const primitive_attr_t *attr,
                 const pooling_fwd_pd_t *hint_fwd_pd)
@@ -64,6 +65,7 @@ struct gen9_pooling_fwd_t : public gpu_primitive_t {
                     && IMPLICATION(utils::one_of(src_data_t, f16, s8, u8),
                             desc()->prop_kind == forward_inference)
                     && post_ops_with_binary_ok(attr(), dst_md()->data_type)
+                    && attr_.set_default_formats(dst_md(0)) == status::success
                     && !is_dilated()
                     && compute_engine->mayiuse(
                             compute::device_ext_t::intel_subgroups)
@@ -89,8 +91,6 @@ struct gen9_pooling_fwd_t : public gpu_primitive_t {
         offsets_t off;
     };
 
-    gen9_pooling_fwd_t(const pd_t *apd) : gpu_primitive_t(apd) {}
-
     status_t init(engine_t *engine) override {
         compute::kernel_ctx_t kernel_ctx;
         status_t status = pd()->init_kernel_ctx(kernel_ctx);
@@ -113,6 +113,7 @@ private:
 };
 
 struct gen9_pooling_bwd_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_pooling_bwd_pd_t {
         pd_t(const pooling_v2_desc_t *adesc, const primitive_attr_t *attr,
                 const pooling_fwd_pd_t *hint_fwd_pd)
@@ -156,8 +157,6 @@ struct gen9_pooling_bwd_t : public gpu_primitive_t {
         pool_conf_t conf;
         offsets_t off;
     };
-
-    gen9_pooling_bwd_t(const pd_t *apd) : gpu_primitive_t(apd) {}
 
     status_t init(engine_t *engine) override {
         compute::kernel_ctx_t kernel_ctx;

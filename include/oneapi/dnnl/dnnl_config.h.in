@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -69,14 +69,17 @@
 // clang-format on
 
 #if defined(DNNL_CPU_RUNTIME) && defined(DNNL_GPU_RUNTIME)
-#if (DNNL_CPU_RUNTIME == DNNL_RUNTIME_NONE) \
-        || (DNNL_CPU_RUNTIME == DNNL_RUNTIME_OCL)
+#if (DNNL_CPU_RUNTIME == DNNL_RUNTIME_OCL)
 #error "Unexpected DNNL_CPU_RUNTIME"
 #endif
 #if (DNNL_GPU_RUNTIME != DNNL_RUNTIME_NONE) \
         && (DNNL_GPU_RUNTIME != DNNL_RUNTIME_OCL) \
         && (DNNL_GPU_RUNTIME != DNNL_RUNTIME_SYCL)
 #error "Unexpected DNNL_GPU_RUNTIME"
+#endif
+#if (DNNL_CPU_RUNTIME == DNNL_RUNTIME_NONE \
+        && DNNL_GPU_RUNTIME == DNNL_RUNTIME_NONE)
+#error "At least one runtime must be specified"
 #endif
 #else
 #error "BOTH DNNL_CPU_RUNTIME and DNNL_GPU_RUNTIME must be defined"
@@ -90,6 +93,9 @@
 #define DNNL_ENABLE_CONCURRENT_EXEC
 #endif
 #endif
+
+// When defined, primitive cache stores runtime objects.
+#cmakedefine DNNL_USE_RT_OBJECTS_IN_PRIMITIVE_CACHE
 
 // When defined, DPCPP is supported.
 #cmakedefine DNNL_WITH_SYCL

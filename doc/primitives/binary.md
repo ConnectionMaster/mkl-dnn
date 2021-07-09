@@ -16,8 +16,9 @@ between tensors source 0 and source 1 (the variable names follow the standard
         \src_0(\overline{x}) \mathbin{op} \src_1(\overline{x}),
 \f]
 
-where \f$op\f$ is addition, subtraction, multiplication, division, get maximum 
-value or get minimum value.
+where \f$op\f$ is one of addition, subtraction, multiplication, division, 
+greater than or equal to, greater than, less than or equal to, less than, 
+equal to, not equal to, get maximum value, and get minimum value.
 
 The binary primitive does not have a notion of forward or backward propagations.
 
@@ -26,12 +27,14 @@ The binary primitive does not have a notion of forward or backward propagations.
 When executed, the inputs and outputs should be mapped to an execution
 argument index as specified by the following table.
 
-| Primitive input/output | Execution argument index                                                  |
-| ---                    | ---                                                                       |
-| \f$\src_0\f$           | DNNL_ARG_SRC_0                                                            |
-| \f$\src_1\f$           | DNNL_ARG_SRC_1                                                            |
-| \dst                   | DNNL_ARG_DST                                                              |
-| \f$binary post-op\f$   | DNNL_ARG_ATTR_MULTIPLE_POST_OP(binary_post_op_position) \| DNNL_ARG_SRC_1 |
+| Primitive input/output      | Execution argument index                                                  |
+| ---                         | ---                                                                       |
+| \f$\src_0\f$                | DNNL_ARG_SRC_0                                                            |
+| \f$\src_1\f$                | DNNL_ARG_SRC_1                                                            |
+| \dst                        | DNNL_ARG_DST                                                              |
+| \f$\text{binary post-op}\f$ | DNNL_ARG_ATTR_MULTIPLE_POST_OP(binary_post_op_position) \| DNNL_ARG_SRC_1 |
+| \f$binary scale0\f$         | DNNL_ARG_ATTR_INPUT_SCALES \| DNNL_ARG_SRC_0                              |
+| \f$binary scale1\f$         | DNNL_ARG_ATTR_INPUT_SCALES \| DNNL_ARG_SRC_1                              |
 
 ## Implementation Details
 
@@ -104,6 +107,9 @@ meaning associated with any of tensors dimensions.
 2. **CPU**
    - For `f32` destination type source 0 and source 1 tensors must have `f32`
      data type.
+
+3. **GPU**
+   - Implicit broadcast for source 0 is not supported.
 
 ## Performance Tips
 

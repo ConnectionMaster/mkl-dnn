@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -20,6 +20,11 @@
 #include <type_traits>
 
 #include "dnnl_test_common.hpp"
+
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_NONE
+#include "tests/test_isa_common.hpp"
+#endif
+
 #include "gtest/gtest.h"
 
 #include "oneapi/dnnl/dnnl.hpp"
@@ -40,14 +45,19 @@ protected:
         e = get_test_engine();
         SKIP_IF(get_test_engine_kind() == engine::kind::gpu,
                 "GPU takes a lot of time to complete this test.");
+
+        bool has_bf16 = false;
+#if DNNL_CPU_RUNTIME != DNNL_RUNTIME_NONE
+        has_bf16 = dnnl::impl::cpu::platform::has_data_type_support(dnnl_bf16);
+#endif
+
+#if DNNL_X64 && DNNL_CPU_RUNTIME != DNNL_RUNTIME_NONE
         static auto isa = get_effective_cpu_isa();
-        bool has_bf16
-                = isa >= cpu_isa::avx512_core && isa != cpu_isa::avx2_vnni;
-
         // to be removed once {sse41, avx2} are enabled
-        bool has_int8_zp_support
-                = isa >= cpu_isa::avx512_core && isa != cpu_isa::avx2_vnni;
-
+        bool has_int8_zp_support = is_superset(isa, cpu_isa::avx512_core);
+#else
+        bool has_int8_zp_support = false;
+#endif
         bool is_cpu = get_test_engine_kind() == engine::kind::cpu;
 
         memory::dims SP1D = {2};

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020 Arm Ltd. and affiliates
+* Copyright 2020-2021 Arm Ltd. and affiliates
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -17,18 +17,9 @@
 #ifndef CPU_AARCH64_ACL_WINOGRAD_CONVOLUTION_HPP
 #define CPU_AARCH64_ACL_WINOGRAD_CONVOLUTION_HPP
 
-#include "common/c_types_map.hpp"
-#include "common/dnnl_thread.hpp"
-#include "common/memory_tracking.hpp"
-#include "common/primitive.hpp"
-
 #include "cpu/cpu_convolution_pd.hpp"
-#include "cpu/platform.hpp"
 
 #include "cpu/aarch64/acl_convolution_utils.hpp"
-
-#include "arm_compute/runtime/NEON/NEFunctions.h"
-#include "arm_compute/runtime/NEON/NEScheduler.h"
 
 namespace dnnl {
 namespace impl {
@@ -84,7 +75,7 @@ struct acl_wino_convolution_fwd_t : public primitive_t {
                 "wino:acl", acl_wino_convolution_fwd_t, USE_GLOBAL_SCRATCHPAD);
 
         status_t init(engine_t *engine) {
-            bool ok = true && is_fwd()
+            bool ok = is_fwd()
                     && utils::one_of(desc()->alg_kind,
                             alg_kind::convolution_auto,
                             alg_kind::convolution_winograd)
@@ -102,19 +93,7 @@ struct acl_wino_convolution_fwd_t : public primitive_t {
 
             set_default_alg_kind(alg_kind::convolution_winograd);
 
-            // Number of threads in Compute Library is set by OMP_NUM_THREADS
-            // dnnl_get_max_threads() == OMP_NUM_THREADS
-            arm_compute::Scheduler::get().set_num_threads(
-                    dnnl_get_max_threads());
-
-            // TODO: remove dependence on scratchpad memory
-            // Using user provided memory for the biases currently segfaults
-            if (acp_.with_bias) {
-                auto scratchpad = scratchpad_registry().registrar();
-                const size_t bia_mem_sz_ = acp_.bia_info.tensor_shape()[0];
-                scratchpad.template book<data_t>(
-                        memory_tracking::names::key_none, bia_mem_sz_);
-            }
+            acl_common_utils::acl_thread_bind();
 
             return status::success;
         }
@@ -131,7 +110,7 @@ struct acl_wino_convolution_fwd_t : public primitive_t {
             // Compute Library supports only one eltwise post-op
             if (po.len() == 1 && is_eltwise(0)) {
                 const auto act_type = po.entry_[0].eltwise.alg;
-                eltwise_ok = acl_convolution_utils::acl_act_ok(act_type);
+                eltwise_ok = acl_common_utils::acl_act_ok(act_type);
             }
 
             return eltwise_ok || (po.len() == 0);

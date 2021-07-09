@@ -33,6 +33,7 @@ namespace gpu {
 namespace ocl {
 
 struct ref_eltwise_fwd_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_eltwise_fwd_pd_t {
         using gpu_eltwise_fwd_pd_t::gpu_eltwise_fwd_pd_t;
 
@@ -54,9 +55,9 @@ struct ref_eltwise_fwd_t : public gpu_primitive_t {
                             eltwise_tanh, eltwise_elu, eltwise_square,
                             eltwise_sqrt, eltwise_soft_relu, eltwise_logistic,
                             eltwise_logsigmoid, eltwise_mish, eltwise_exp,
-                            eltwise_gelu_tanh, eltwise_swish, eltwise_log,
-                            eltwise_clip, eltwise_clip_v2, eltwise_pow,
-                            eltwise_gelu_erf, eltwise_round,
+                            eltwise_gelu_tanh, eltwise_hardswish, eltwise_swish,
+                            eltwise_log, eltwise_clip, eltwise_clip_v2,
+                            eltwise_pow, eltwise_gelu_erf, eltwise_round,
                             eltwise_relu_use_dst_for_bwd,
                             eltwise_logistic_use_dst_for_bwd,
                             eltwise_tanh_use_dst_for_bwd,
@@ -70,6 +71,7 @@ struct ref_eltwise_fwd_t : public gpu_primitive_t {
                     && attr()->has_default_values(attr_skip_mask)
                     && post_ops_with_binary_ok(
                             attr(), dst_md()->data_type, MAX_NDIMS)
+                    && attr_.set_default_formats(dst_md(0)) == status::success
                     && IMPLICATION(
                             desc()->data_desc.data_type == data_type::f16,
                             compute_engine->mayiuse(
@@ -85,8 +87,6 @@ struct ref_eltwise_fwd_t : public gpu_primitive_t {
         eltwise_conf_t conf;
         offsets_t off;
     };
-
-    ref_eltwise_fwd_t(const pd_t *apd) : gpu_primitive_t(apd) {}
 
     status_t init(engine_t *engine) override {
         compute::kernel_ctx_t kernel_ctx;
@@ -111,6 +111,7 @@ private:
 };
 
 struct ref_eltwise_bwd_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_eltwise_bwd_pd_t {
         pd_t(const eltwise_desc_t *adesc, const primitive_attr_t *attr,
                 const eltwise_fwd_pd_t *hint_fwd_pd)
@@ -130,9 +131,10 @@ struct ref_eltwise_bwd_t : public gpu_primitive_t {
                             eltwise_tanh, eltwise_elu, eltwise_square,
                             eltwise_sqrt, eltwise_soft_relu, eltwise_logsigmoid,
                             eltwise_mish, eltwise_logistic, eltwise_exp,
-                            eltwise_gelu_tanh, eltwise_swish, eltwise_log,
-                            eltwise_clip, eltwise_clip_v2, eltwise_pow,
-                            eltwise_gelu_erf, eltwise_relu_use_dst_for_bwd,
+                            eltwise_gelu_tanh, eltwise_hardswish, eltwise_swish,
+                            eltwise_log, eltwise_clip, eltwise_clip_v2,
+                            eltwise_pow, eltwise_gelu_erf,
+                            eltwise_relu_use_dst_for_bwd,
                             eltwise_logistic_use_dst_for_bwd,
                             eltwise_tanh_use_dst_for_bwd,
                             eltwise_elu_use_dst_for_bwd,
@@ -155,8 +157,6 @@ struct ref_eltwise_bwd_t : public gpu_primitive_t {
         offsets_t off;
         bool use_dense;
     };
-
-    ref_eltwise_bwd_t(const pd_t *apd) : gpu_primitive_t(apd) {}
 
     status_t init(engine_t *engine) override {
         compute::kernel_ctx_t kernel_ctx;

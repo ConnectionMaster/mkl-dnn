@@ -1,5 +1,5 @@
 #===============================================================================
-# Copyright 2016-2020 Intel Corporation
+# Copyright 2016-2021 Intel Corporation
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -30,11 +30,14 @@ append(CMAKE_CXX_FLAGS "${CMAKE_CCXX_SANITIZER_FLAGS}")
 append(CMAKE_C_FLAGS "${CMAKE_CCXX_NOWARN_FLAGS}")
 append(CMAKE_CXX_FLAGS "${CMAKE_CCXX_NOWARN_FLAGS}")
 
-include_directories(${PROJECT_SOURCE_DIR}/include)
-include_directories(${PROJECT_SOURCE_DIR}/examples)
+include_directories_with_host_compiler(${PROJECT_SOURCE_DIR}/include)
+include_directories_with_host_compiler(${PROJECT_SOURCE_DIR}/examples)
+
+append_host_compiler_options(CMAKE_CXX_FLAGS "${DPCPP_EXAMPLE_CXX_FLAGS}")
+append_host_compiler_options(CMAKE_CXX_FLAGS "${DPCPP_CXX_NOWARN_FLAGS}")
 
 if(UNIX)
-    find_library(LIBM m)
+    find_library(LIBM m REQUIRED)
 endif()
 
 file(GLOB_RECURSE sources *.cpp *.c)
@@ -81,9 +84,11 @@ foreach(src ${sources})
     endforeach()
 
     if(${example_name} MATCHES "(cross-engine|cpu|gpu)-")
-        # Example name contains cross-engine, cpu or gpu
-        if(NOT ${example_name} MATCHES ".*opencl" OR DNNL_GPU_RUNTIME STREQUAL "OCL")
-            register_exe(${example_name} ${src} "test" ${LIBM})
+        if(NOT DNNL_CPU_RUNTIME STREQUAL "NONE" OR ${example_name} MATCHES "gpu-")
+            # Example name contains cross-engine, cpu or gpu
+            if(NOT ${example_name} MATCHES ".*opencl" OR DNNL_GPU_RUNTIME STREQUAL "OCL")
+                register_exe(${example_name} ${src} "test" ${LIBM})
+            endif()
         endif()
     else()
         set(cpu_rt_pattern "(SEQ|OMP|TBB|SYCL|DPCPP)")

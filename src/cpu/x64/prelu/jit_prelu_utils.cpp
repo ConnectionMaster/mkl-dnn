@@ -1,6 +1,5 @@
-
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -14,8 +13,13 @@
 * See the License for the specific language governing permissions and
 * limitations under the License.
 *******************************************************************************/
-#include "jit_prelu_utils.hpp"
-#include "cpu/x64/jit_avx512_core_bf16cvt.hpp"
+
+#include <algorithm>
+#include <cassert>
+#include <set>
+
+#include "common/memory_desc_wrapper.hpp"
+#include "cpu/x64/prelu/jit_prelu_utils.hpp"
 
 namespace dnnl {
 namespace impl {
@@ -40,7 +44,7 @@ cpu_isa_t get_supported_isa() {
     return isa_any;
 }
 
-int get_vlen(const cpu_isa_t &isa) noexcept {
+static int get_vlen(const cpu_isa_t &isa) noexcept {
     if (isa == avx512_core_bf16)
         return cpu_isa_traits<avx512_core_bf16>::vlen;
     else if (isa == avx512_core)
@@ -68,17 +72,69 @@ int get_n_vregs(const cpu_isa_t &isa) noexcept {
     return cpu_isa_traits<sse41>::n_vregs;
 }
 
-bcast get_bcast_type(
+bool is_s8u8(const std::set<data_type_t> &tensor_data_types) noexcept {
+    return std::any_of(tensor_data_types.cbegin(), tensor_data_types.cend(),
+            [](const data_type_t &dt) {
+                return utils::one_of(dt, data_type::s8, data_type::u8);
+            });
+}
+
+int get_simd_w(const std::set<data_type_t> &tensor_data_types) noexcept {
+    const auto &isa = prelu::get_supported_isa();
+
+    return (isa == avx && is_s8u8(tensor_data_types))
+            ? vmm_traits_t<Xbyak::Xmm>::vlen / sizeof(float)
+            : prelu::get_vlen(isa) / sizeof(float);
+}
+
+static bool dims_equal(
+        const dims_t &lhs_dims, const dims_t &rhs_dims, const dim_t ndims) {
+
+    for (dim_t i = 0; i < ndims; ++i) {
+        if (lhs_dims[i] != rhs_dims[i]) return false;
+    }
+
+    return true;
+}
+
+static bool is_full_bcast(
         const memory_desc_wrapper &lhs, const memory_desc_wrapper &rhs) {
+    const auto lhs_ndims = lhs.ndims();
+    const auto rhs_ndims = rhs.ndims();
+    const dims_t &lhs_dims = lhs.dims();
+    const dims_t &rhs_dims = rhs.dims();
 
-    if (lhs == rhs) return bcast::full;
-    const auto &lhs_ndims = lhs.ndims();
-    const auto &rhs_ndims = rhs.ndims();
+    if (lhs_ndims == rhs_ndims && dims_equal(lhs_dims, rhs_dims, lhs_ndims)
+            && lhs.format_kind() == rhs.format_kind()) {
 
-    if (lhs_ndims != rhs_ndims || lhs_ndims < 2) return bcast::unsupported;
+        if (lhs.is_blocking_desc()) {
+            const auto &lhs_bd = lhs.blocking_desc();
+            const auto &rhs_bd = rhs.blocking_desc();
+            const dims_t &lhs_strides = lhs_bd.strides;
+            const dims_t &rhs_strides = rhs_bd.strides;
+            const dims_t &lhs_inner_blks = lhs_bd.inner_blks;
+            const dims_t &rhs_inner_blks = rhs_bd.inner_blks;
+            const dims_t &lhs_inner_idxs = lhs_bd.inner_idxs;
+            const dims_t &rhs_inner_idxs = rhs_bd.inner_idxs;
+
+            return lhs_bd.inner_nblks == rhs_bd.inner_nblks
+                    && dims_equal(lhs_strides, rhs_strides, lhs_ndims)
+                    && dims_equal(lhs_inner_blks, rhs_inner_blks, lhs_ndims)
+                    && dims_equal(lhs_inner_idxs, rhs_inner_idxs, lhs_ndims);
+        }
+
+        return true;
+    }
+
+    return false;
+}
+
+static bool is_per_oc_bcast(
+        const memory_desc_wrapper &lhs, const memory_desc_wrapper &rhs) {
 
     const auto &rhs_dims = rhs.dims();
     const auto &lhs_dims = lhs.dims();
+    const auto &rhs_ndims = rhs.ndims();
 
     bool bcast_per_oc_exists = rhs_dims[0] == 1 && rhs_dims[1] == lhs_dims[1];
 
@@ -88,7 +144,19 @@ bcast get_bcast_type(
         }
     }
 
-    if (bcast_per_oc_exists) {
+    return bcast_per_oc_exists;
+}
+
+bcast get_bcast_type(
+        const memory_desc_wrapper &lhs, const memory_desc_wrapper &rhs) {
+
+    if (is_full_bcast(lhs, rhs)) return bcast::full;
+    const auto &lhs_ndims = lhs.ndims();
+    const auto &rhs_ndims = rhs.ndims();
+
+    if (lhs_ndims != rhs_ndims || lhs_ndims < 2) return bcast::unsupported;
+
+    if (is_per_oc_bcast(lhs, rhs)) {
         const auto &strides = lhs.blocking_desc().strides;
 
         if (!lhs.is_plain())
@@ -103,199 +171,57 @@ bcast get_bcast_type(
     return bcast::unsupported;
 }
 
-template <typename Vmm>
-jit_prelu_io_helper<Vmm>::jit_prelu_io_helper(jit_generator *host,
-        const cpu_isa_t &isa, const data_type_t &data_type,
-        std::size_t tail_size, const Xbyak::Opmask &tail_opmask,
-        const Vmm &tail_vmm_mask, const Xbyak::Reg64 &reg_tmp)
-    : host_(host)
-    , isa_(isa)
-    , data_type_(data_type)
-    , tail_size_(tail_size)
-    , tail_opmask_(tail_opmask)
-    , tail_vmm_mask_(tail_vmm_mask)
-    , reg_tmp_(reg_tmp)
-    , bf16_supported_(utils::one_of(isa, avx512_core, avx512_core_bf16))
-    , bf16_emu_(data_type_ == data_type::bf16 && isa == avx512_core
-                      ? utils::make_unique<bf16_emulation_t>(host_,
-                              host_->zmm28, host_->zmm29, host_->zmm30,
-                              host_->rax, host_->zmm31)
-                      : nullptr) {
+bool dt_supported(const std::set<data_type_t> &tensor_data_types) noexcept {
 
-    if (bf16_emu_) bf16_emu_->init_vcvtneps2bf16();
+    const bool tensor_dt_valid = std::all_of(tensor_data_types.cbegin(),
+            tensor_data_types.cend(), [](const data_type_t &dt) {
+                return utils::one_of(dt, data_type::bf16, data_type::f32,
+                        data_type::s32, data_type::u8, data_type::s8);
+            });
+
+    if (tensor_dt_valid) {
+        const bool any_tensor_bf16 = std::any_of(tensor_data_types.cbegin(),
+                tensor_data_types.cend(),
+                [](const data_type_t &dt) { return dt == data_type::bf16; });
+
+        return IMPLICATION(any_tensor_bf16, mayiuse(avx512_core));
+    }
+
+    return false;
 }
 
-template <typename Vmm>
-jit_prelu_io_helper<Vmm>::~jit_prelu_io_helper() = default;
-
-template <>
-void jit_prelu_io_helper<Xbyak::Zmm>::prepare_tail_mask() {
-    if (!tail_size_) return;
-
-    const int mask_f32 = (1 << tail_size_) - 1;
-    const Xbyak::Reg32 regw_tmp = reg_tmp_.cvt32();
-    host_->mov(regw_tmp, mask_f32);
-    host_->kmovw(tail_opmask_, regw_tmp);
+size_t c_blk_nelems(const memory_desc_t *mem, bool padding) noexcept {
+    const memory_desc_wrapper mem_d {mem};
+    return mem_d.nelems(padding) / mem_d.dims()[0];
 }
 
-template <typename Vmm>
-void jit_prelu_io_helper<Vmm>::prepare_tail_mask() {
-    if (!tail_size_ || isa_ == sse41) return;
-
-    static const uint32_t mask_f32[14]
-            = {0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff, 0xffffffff,
-                    0xffffffff, 0xffffffff, 0, 0, 0, 0, 0, 0, 0};
-
-    host_->mov(reg_tmp_, reinterpret_cast<size_t>(&mask_f32[7 - tail_size_]));
-    host_->vmovups(tail_vmm_mask_, host_->ptr[reg_tmp_]);
+size_t get_block_tail_size(const memory_desc_t *mem) noexcept {
+    const memory_desc_wrapper mem_d {mem};
+    return mem_d.padded_dims()[1] - mem_d.dims()[1];
 }
 
-template <typename Vmm>
-void jit_prelu_io_helper<Vmm>::load(
-        const Xbyak::Address &src_addr, const Vmm &dst_vmm, bool tail) {
-    if (tail)
-        load_tail(src_addr, dst_vmm);
+void apply_zero_padding(jit_generator *host, const size_t tail_size,
+        const data_type_t dt, const size_t block_tail_size,
+        const Xbyak::Reg64 &reg_dst, const Xbyak::Reg64 *reg_offset) noexcept {
+    using namespace Xbyak;
+    using namespace Xbyak::util;
+
+    const Reg32 &reg_zero = eax;
+    const Reg64 &reg_ptr = rdi;
+    const Reg64 &reg_counter = rcx;
+    const auto dt_size = types::data_type_size(dt);
+    const auto off_start = tail_size * dt_size;
+    const auto off_end = off_start + block_tail_size * dt_size;
+
+    host->xor_(reg_zero, reg_zero);
+    if (reg_offset == nullptr)
+        host->lea(reg_ptr, ptr[reg_dst + off_start]);
     else
-        switch (data_type_) {
-            case data_type::f32: host_->uni_vmovups(dst_vmm, src_addr); break;
-            case data_type::bf16:
-                if (bf16_supported_) {
-                    host_->vpmovzxwd(dst_vmm, src_addr);
-                    host_->vpslld(dst_vmm, dst_vmm, 0x10);
-                    break;
-                }
-            default: assert(!"unsupported data type");
-        }
+        host->lea(reg_ptr, ptr[reg_dst + (*reg_offset * dt_size) + off_start]);
+    host->mov(reg_counter, off_end - off_start);
+    host->rep();
+    host->stosb();
 }
-
-template <>
-void jit_prelu_io_helper<Xbyak::Zmm>::load_tail(
-        const Xbyak::Address &src_addr, const Xbyak::Zmm &dst_vmm) {
-    switch (data_type_) {
-        case data_type::f32:
-            host_->uni_vmovups_tail(dst_vmm, tail_opmask_, src_addr);
-            break;
-        case data_type::bf16:
-            if (bf16_supported_) {
-                host_->vpmovzxwd(dst_vmm | tail_opmask_ | host_->T_z, src_addr);
-                host_->vpslld(dst_vmm, dst_vmm, 0x10);
-            }
-            break;
-        default: assert(!"unsupported data type");
-    }
-}
-
-template <>
-void jit_prelu_io_helper<Xbyak::Ymm>::load_tail(
-        const Xbyak::Address &src_addr, const Xbyak::Ymm &dst_vmm) {
-    host_->uni_vmovups_tail(dst_vmm, tail_vmm_mask_, src_addr);
-}
-
-template <>
-void jit_prelu_io_helper<Xbyak::Xmm>::load_tail(
-        const Xbyak::Address &src_addr, const Xbyak::Xmm &dst_vmm) {
-    if (isa_ == sse41) {
-        host_->uni_vxorps(dst_vmm, dst_vmm, dst_vmm);
-        for (size_t tail_elem = 0; tail_elem < tail_size_; tail_elem++)
-            host_->pinsrd(dst_vmm,
-                    host_->ptr[src_addr.getRegExp()
-                            + Xbyak::RegExp(tail_elem * sizeof(float))],
-                    tail_elem);
-    } else
-        host_->vmaskmovps(dst_vmm, tail_vmm_mask_, src_addr);
-}
-
-template <>
-void jit_prelu_io_helper<Xbyak::Zmm>::store_tail(
-        const Xbyak::Zmm &src_vmm, const Xbyak::Address &dst_addr) {
-    switch (data_type_) {
-        case data_type::f32:
-            host_->uni_vmovups_tail(dst_addr, tail_opmask_, src_vmm);
-            break;
-        case data_type::bf16: {
-            if (bf16_supported_) {
-                const Xbyak::Ymm ymm_src {src_vmm.getIdx()};
-                if (bf16_emu_)
-                    bf16_emu_->vcvtneps2bf16(ymm_src, src_vmm);
-                else
-                    host_->vcvtneps2bf16(ymm_src, src_vmm);
-                host_->vmovdqu16(dst_addr | tail_opmask_, ymm_src);
-                break;
-            }
-        }
-        default: assert(!"unsupported data type");
-    }
-}
-
-template <>
-void jit_prelu_io_helper<Xbyak::Ymm>::store_tail(
-        const Xbyak::Ymm &src_vmm, const Xbyak::Address &dst_addr) {
-    host_->uni_vmovups_tail(dst_addr, tail_vmm_mask_, src_vmm);
-}
-
-template <>
-void jit_prelu_io_helper<Xbyak::Xmm>::store_tail(
-        const Xbyak::Xmm &src_vmm, const Xbyak::Address &dst_addr) {
-    if (isa_ == sse41) {
-        for (size_t tail_elem = 0; tail_elem < tail_size_; tail_elem++)
-            host_->pextrd(host_->ptr[dst_addr.getRegExp()
-                                  + Xbyak::RegExp(tail_elem * sizeof(float))],
-                    src_vmm, tail_elem);
-    } else {
-        host_->vmaskmovps(dst_addr, tail_vmm_mask_, src_vmm);
-    }
-}
-
-template <>
-void jit_prelu_io_helper<Xbyak::Zmm>::store(
-        const Xbyak::Zmm &src_vmm, const Xbyak::Address &dst_addr, bool tail) {
-    if (tail)
-        store_tail(src_vmm, dst_addr);
-    else
-        switch (data_type_) {
-            case data_type::f32: host_->uni_vmovups(dst_addr, src_vmm); break;
-            case data_type::bf16: {
-                if (bf16_supported_) {
-                    const Xbyak::Ymm src_ymm {src_vmm.getIdx()};
-                    if (bf16_emu_)
-                        bf16_emu_->vcvtneps2bf16(src_ymm, src_vmm);
-                    else
-                        host_->vcvtneps2bf16(src_ymm, src_vmm);
-                    host_->vmovdqu16(dst_addr, src_ymm);
-                    break;
-                }
-            }
-            default: assert(!"unsupported data type");
-        }
-}
-
-template <typename Vmm>
-void jit_prelu_io_helper<Vmm>::store(
-        const Vmm &src_vmm, const Xbyak::Address &dst_addr, bool tail) {
-    if (tail)
-        store_tail(src_vmm, dst_addr);
-    else
-        host_->uni_vmovups(dst_addr, src_vmm);
-}
-
-template <typename Vmm>
-void jit_prelu_io_helper<Vmm>::broadcast(
-        const Xbyak::Address &src_addr, const Vmm &dst_vmm) {
-    switch (data_type_) {
-        case data_type::f32: host_->uni_vbroadcastss(dst_vmm, src_addr); break;
-        case data_type::bf16:
-            if (bf16_supported_) {
-                host_->vpbroadcastw(dst_vmm, src_addr);
-                host_->vpslld(dst_vmm, dst_vmm, 0x10);
-                break;
-            }
-        default: assert(!"unsupported data type");
-    }
-}
-
-template class jit_prelu_io_helper<Xbyak::Zmm>;
-template class jit_prelu_io_helper<Xbyak::Ymm>;
-template class jit_prelu_io_helper<Xbyak::Xmm>;
 
 } // namespace prelu
 } // namespace x64

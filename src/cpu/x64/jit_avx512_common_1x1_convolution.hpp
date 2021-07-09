@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2017-2020 Intel Corporation
+* Copyright 2017-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -30,7 +30,7 @@
 
 #include "cpu/x64/cpu_reducer.hpp"
 #include "cpu/x64/jit_avx512_common_1x1_conv_kernel.hpp"
-#include "cpu/x64/jit_transpose_src_utils.hpp"
+#include "cpu/x64/jit_transpose_utils.hpp"
 #include "cpu/x64/jit_uni_1x1_conv_utils.hpp"
 #include "cpu/x64/jit_uni_dw_convolution.hpp"
 
@@ -64,22 +64,18 @@ struct jit_avx512_common_1x1_convolution_fwd_t : public primitive_t {
                             data_type::undef)
                     && attr()->has_default_values(
                             primitive_attr_t::skip_mask_t::post_ops, dst_type)
-                    && !has_zero_dim_memory() && set_default_formats();
+                    && !has_zero_dim_memory() && set_default_formats()
+                    && attr_.set_default_formats(dst_md(0)) == status::success;
             if (!ok) return status::unimplemented;
 
             const convolution_desc_t *conv_d = desc();
             const memory_desc_t *src_d = src_md();
             rtus_prepare(this, conv_d, src_d, dst_md(), weights_md());
 
-            status_t status = jit_avx512_common_1x1_conv_kernel::init_conf(jcp_,
-                    *conv_d, *src_d, *weights_md(), *dst_md(), *attr(),
-                    dnnl_get_max_threads(), rtus_.reduce_src_);
-            if (status != status::success) return status;
-
-            if (jcp_.with_dw_conv) {
-                status = depthwise_po_init(engine);
-                if (status != status::success) return status;
-            }
+            CHECK(jit_avx512_common_1x1_conv_kernel::init_conf(jcp_, *conv_d,
+                    *src_d, *weights_md(), *dst_md(), *attr(),
+                    dnnl_get_max_threads(), rtus_.reduce_src_));
+            if (jcp_.with_dw_conv) CHECK(depthwise_po_init(engine));
 
             auto scratchpad = scratchpad_registry().registrar();
             jit_avx512_common_1x1_conv_kernel::init_scratchpad(
@@ -151,7 +147,6 @@ struct jit_avx512_common_1x1_convolution_fwd_t : public primitive_t {
             auto &jcp_1x1 = jcp_;
             primitive_attr_t attr_1x1(*attr());
             if (!attr_1x1.is_initialized()) return status::out_of_memory;
-            attr_1x1.set_scratchpad_mode(scratchpad_mode::user);
             const auto &src_md = dst_md_;
             const memory_desc_wrapper src_d(src_md);
             const auto nthr = dnnl_get_max_threads();

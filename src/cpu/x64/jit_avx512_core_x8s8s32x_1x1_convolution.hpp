@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2018-2020 Intel Corporation
+* Copyright 2018-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -59,38 +59,33 @@ struct jit_avx512_core_x8s8s32x_1x1_convolution_fwd_t : public primitive_t {
                 jit_avx512_core_x8s8s32x_1x1_convolution_fwd_t);
 
         status_t init(engine_t *engine) {
+            using namespace data_type;
             using smask_t = primitive_attr_t::skip_mask_t;
-            bool ok = true && is_fwd()
+            bool ok = is_fwd()
                     && set_default_alg_kind(alg_kind::convolution_direct)
-                    && expect_data_types(src_type, data_type::s8,
-                            data_type::undef, dst_type, data_type::s32)
+                    && expect_data_types(
+                            src_type, s8, data_type::undef, dst_type, s32)
                     && IMPLICATION(with_bias(),
-                            utils::one_of(desc()->bias_desc.data_type,
-                                    data_type::f32, data_type::s32,
-                                    data_type::s8, data_type::u8))
+                            utils::one_of(desc()->bias_desc.data_type, f32, s32,
+                                    s8, u8))
                     && attr()->has_default_values(smask_t::oscale
                                     | smask_t::zero_points_runtime
                                     | smask_t::post_ops,
                             dst_type)
                     && !has_zero_dim_memory() && zero_points_ok()
                     && set_default_formats_common(
-                            dat_tag(), format_tag::any, dat_tag());
-
+                            dat_tag(), format_tag::any, dat_tag())
+                    && attr_.set_default_formats(dst_md(0)) == status::success;
             if (!ok) return status::unimplemented;
+
             const convolution_desc_t *conv_d = desc();
             const memory_desc_t *src_d = src_md();
             rtus_prepare(this, conv_d, src_d, dst_md(), weights_md());
 
-            status_t status
-                    = jit_avx512_core_x8s8s32x_1x1_conv_kernel::init_conf(jcp_,
-                            *conv_d, src_d, weights_md_, dst_md_, bias_md_,
-                            *attr(), dnnl_get_max_threads(), rtus_.reduce_src_);
-            if (status != status::success) return status;
-
-            if (jcp_.with_dw_conv) {
-                status = depthwise_po_init(engine);
-                if (status != status::success) return status;
-            }
+            CHECK(jit_avx512_core_x8s8s32x_1x1_conv_kernel::init_conf(jcp_,
+                    *conv_d, src_d, weights_md_, dst_md_, bias_md_, *attr(),
+                    dnnl_get_max_threads(), rtus_.reduce_src_));
+            if (jcp_.with_dw_conv) CHECK(depthwise_po_init(engine));
 
             auto scratchpad = scratchpad_registry().registrar();
             jit_avx512_core_x8s8s32x_1x1_conv_kernel::init_scratchpad(
@@ -199,7 +194,6 @@ struct jit_avx512_core_x8s8s32x_1x1_convolution_fwd_t : public primitive_t {
             auto &jcp_1x1 = jcp_;
             primitive_attr_t attr_1x1(*attr());
             if (!attr_1x1.is_initialized()) return status::out_of_memory;
-            attr_1x1.set_scratchpad_mode(scratchpad_mode::user);
 
             const auto &src_md = dst_md_;
             const memory_desc_wrapper src_d(src_md);

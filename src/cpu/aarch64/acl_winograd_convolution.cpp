@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020 Arm Ltd. and affiliates
+* Copyright 2020-2021 Arm Ltd. and affiliates
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -14,16 +14,7 @@
 * limitations under the License.
 *******************************************************************************/
 
-#include "dnnl_types.h"
-
-#include "common/c_types_map.hpp"
-#include "common/dnnl_thread.hpp"
-#include "common/type_helpers.hpp"
-#include "common/utils.hpp"
-#include "cpu/aarch64/acl_convolution_utils.hpp"
 #include "cpu/aarch64/acl_winograd_convolution.hpp"
-
-#include <cstring>
 
 namespace dnnl {
 namespace impl {
@@ -55,15 +46,9 @@ status_t acl_wino_convolution_fwd_t::execute_forward(
     acl_wino_obj.wei_tensor.allocator()->import_memory(
             const_cast<data_t *>(wei_base));
     acl_wino_obj.dst_tensor.allocator()->import_memory(dst_base);
-
-    // Retrieve extra bias memory from the scratchpad and copy from user memory
     if (with_bias) {
-        const auto scratchpad = ctx.get_scratchpad_grantor();
-        data_t *bia_memory = scratchpad.template get<data_t>(
-                memory_tracking::names::key_none);
-        size_t oc = acl_wino_obj.bia_tensor.info()->tensor_shape()[0];
-        std::memcpy(bia_memory, bia_base, oc * sizeof(data_t));
-        acl_wino_obj.bia_tensor.allocator()->import_memory(bia_memory);
+        acl_wino_obj.bia_tensor.allocator()->import_memory(
+                const_cast<data_t *>(bia_base));
     }
 
     acl_wino_obj.conv.run();

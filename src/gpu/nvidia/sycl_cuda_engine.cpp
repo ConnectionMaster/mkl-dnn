@@ -17,6 +17,9 @@
 
 #include <CL/sycl/backend/cuda.hpp>
 
+#include "common/impl_list_item.hpp"
+#include "common/utils.hpp"
+
 #include "sycl/sycl_utils.hpp"
 
 #include "gpu/nvidia/cudnn_batch_normalization.hpp"
@@ -51,7 +54,7 @@ status_t cuda_engine_create(engine_t **engine, engine_kind_t engine_kind,
         const cl::sycl::device &dev, const cl::sycl::context &ctx,
         size_t index) {
     CHECK(nvidia::check_device(engine_kind));
-    std::unique_ptr<nvidia::sycl_cuda_engine_t> cuda_engine(
+    std::unique_ptr<nvidia::sycl_cuda_engine_t, engine_deleter_t> cuda_engine(
             (new nvidia::sycl_cuda_engine_t(dev, ctx, index)));
     if (!cuda_engine) return status::out_of_memory;
 
@@ -78,21 +81,31 @@ sycl_cuda_engine_t::sycl_cuda_engine_t(
 status_t sycl_cuda_engine_t::set_cublas_handle() {
     // scoped context will make sure the top of the stack context is
     // the engine context while creating the cublas handle.
-    cublasHandle_t handle;
     cuda_sycl_scoped_context_handler_t sc(*this);
+    cublasHandle_t handle;
     CHECK(CUBLAS_EXECUTE_FUNC_S(cublasCreate, &handle));
-    cublas_handle_.reset(new cublasHandle_t(handle));
+    cublas_handle_.set(
+            std::unique_ptr<cublasHandle_t, void (*)(cublasHandle_t *)>(
+                    new cublasHandle_t(handle), [](cublasHandle_t *h) {
+                        if (h != nullptr)
+                            CUBLAS_EXECUTE_FUNC_V(cublasDestroy, *h);
+                        delete h;
+                    }));
     handle = nullptr;
     return status::success;
 }
 
 status_t sycl_cuda_engine_t::set_cudnn_handle() {
     // scoped context will make sure the top of the stack context is
-    // the engine context while creating the cublas handle.
-    cudnnHandle_t handle;
+    // the engine context while creating the cudnn handle.
     cuda_sycl_scoped_context_handler_t sc(*this);
+    cudnnHandle_t handle;
     CHECK(CUDNN_EXECUTE_FUNC_S(cudnnCreate, &handle));
-    cudnn_handle_.reset(new cudnnHandle_t(handle));
+    cudnn_handle_.set(std::unique_ptr<cudnnHandle_t, void (*)(cudnnHandle_t *)>(
+            new cudnnHandle_t(handle), [](cudnnHandle_t *h) {
+                if (h != nullptr) CUDNN_EXECUTE_FUNC_V(cudnnDestroy, *h);
+                delete h;
+            }));
     handle = nullptr;
     return status::success;
 }
@@ -125,6 +138,16 @@ status_t sycl_cuda_engine_t::underlying_context_type() {
     return status::success;
 }
 
+cudnnHandle_t *sycl_cuda_engine_t::get_cudnn_handle() {
+    if (!cudnn_handle_.is_set()) set_cudnn_handle();
+    return cudnn_handle_.get().get();
+}
+
+cublasHandle_t *sycl_cuda_engine_t::get_cublas_handle() {
+    if (!cublas_handle_.is_set()) set_cublas_handle();
+    return cublas_handle_.get().get();
+}
+
 device_id_t sycl_cuda_engine_t::device_id() const {
     return device_id_t(static_cast<int>(sycl::backend_t::nvidia),
             static_cast<uint64_t>(
@@ -132,11 +155,39 @@ device_id_t sycl_cuda_engine_t::device_id() const {
             static_cast<uint64_t>(0));
 }
 
+void sycl_cuda_engine_t::activate_stream_cublas(stream_t *stream) {
+    cuda_sycl_scoped_context_handler_t sc(*this);
+    auto cuda_stream = utils::downcast<sycl_cuda_stream_t *>(stream);
+    auto streamId = cuda_stream->get_underlying_stream();
+    assert(context() == cuda_stream->queue().get_context());
+    cudaStream_t current_stream_id = nullptr;
+    auto cublas_handle = get_cublas_handle();
+    CUBLAS_EXECUTE_FUNC(cublasGetStream, *cublas_handle, &current_stream_id);
+    if (current_stream_id != streamId) {
+        CUBLAS_EXECUTE_FUNC(cublasSetStream, *cublas_handle, streamId);
+    }
+}
+
+void sycl_cuda_engine_t::activate_stream_cudnn(stream_t *stream) {
+    cuda_sycl_scoped_context_handler_t sc(*this);
+    auto cuda_stream = utils::downcast<sycl_cuda_stream_t *>(stream);
+    auto streamId = cuda_stream->get_underlying_stream();
+    assert(context() == cuda_stream->queue().get_context());
+    cudaStream_t current_stream_id = nullptr;
+    auto cudnn_handle = get_cudnn_handle();
+    CUDNN_EXECUTE_FUNC(cudnnGetStream, *cudnn_handle, &current_stream_id);
+    if (current_stream_id != streamId) {
+        CUDNN_EXECUTE_FUNC(cudnnSetStream, *cudnn_handle, streamId);
+    }
+}
+
 namespace {
 using namespace dnnl::impl::data_type;
-#define INSTANCE(...) &primitive_desc_t::create<__VA_ARGS__::pd_t>
+#define INSTANCE(...) \
+    impl_list_item_t( \
+            impl_list_item_t::type_deduction_helper_t<__VA_ARGS__::pd_t>())
 // clang-format off
-const dnnl::impl::engine_t::primitive_desc_create_f sycl_cuda_impl_list[] = {
+const dnnl::impl::impl_list_item_t sycl_cuda_impl_list[] = {
         // Elementwise
         INSTANCE(cudnn_eltwise_fwd_t),
         INSTANCE(cudnn_eltwise_bwd_t),
@@ -189,8 +240,8 @@ const dnnl::impl::engine_t::primitive_desc_create_f sycl_cuda_impl_list[] = {
 // clang-format on
 #undef INSTANCE
 } // namespace
-const dnnl::impl::engine_t::primitive_desc_create_f *
-sycl_cuda_engine_t::get_implementation_list(const op_desc_t *) const {
+const dnnl::impl::impl_list_item_t *sycl_cuda_engine_t::get_implementation_list(
+        const op_desc_t *) const {
     return sycl_cuda_impl_list;
 }
 

@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -38,11 +38,27 @@ status_t sycl_stream_t::init() {
         auto &sycl_ctx = sycl_engine.context();
         auto &sycl_dev = sycl_engine.device();
 
-        cl::sycl::property_list props = (flags() & stream_flags::in_order)
-                ? cl::sycl::
-                        property_list {cl::sycl::property::queue::in_order {}}
-                : cl::sycl::property_list {};
-        queue_.reset(new cl::sycl::queue(sycl_ctx, sycl_dev, props));
+        // FIXME: workaround for Intel(R) oneAPI DPC++ Compiler
+        // Intel(R) oneAPI DPC++ Compiler does not work with multiple queues so
+        // try to reuse the service stream from the engine.
+        // That way all oneDNN streams constructed without interop API are
+        // mapped to the same SYCL queue.
+        // If service stream is NULL then the current stream will be service
+        // so construct it from scratch.
+        if (!sycl_engine.is_service_stream_created()) {
+            cl::sycl::property_list props = (flags() & stream_flags::in_order)
+                    ? cl::sycl::property_list {cl::sycl::property::queue::
+                                    in_order {}}
+                    : cl::sycl::property_list {};
+            queue_.reset(new cl::sycl::queue(sycl_ctx, sycl_dev, props));
+        } else {
+            // XXX: multiple queues support has some issues, so always re-use
+            // the same queue from the service stream.
+            stream_t *service_stream;
+            CHECK(sycl_engine.get_service_stream(service_stream));
+            auto sycl_stream = utils::downcast<sycl_stream_t *>(service_stream);
+            queue_.reset(new cl::sycl::queue(sycl_stream->queue()));
+        }
     } else {
         // TODO: Compare device and context of the engine with those of the
         // queue after SYCL adds support for device/context comparison.

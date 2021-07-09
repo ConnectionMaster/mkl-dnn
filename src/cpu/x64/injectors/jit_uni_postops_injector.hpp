@@ -57,7 +57,7 @@ bool is_supported(const post_ops_ok_args_t &post_ops_ok_args);
  * specialized injectors to generate post-ops code to host primitive. Random
  * order of post-ops is supported.
  */
-template <cpu_isa_t isa>
+template <cpu_isa_t isa, typename Vmm = typename cpu_isa_traits<isa>::Vmm>
 class jit_uni_postops_injector_t {
 public:
     /*
@@ -128,7 +128,7 @@ private:
     jit_generator *host_;
     std::map<dnnl::impl::alg_kind_t, jit_uni_eltwise_injector_f32<isa>>
             alg_to_eltwise_injector_;
-    std::unique_ptr<binary_injector::jit_uni_binary_injector_t<isa>>
+    std::unique_ptr<binary_injector::jit_uni_binary_injector_t<isa, Vmm>>
             binary_injector_;
     lambda_jit_injectors_t lambda_jit_injectors_;
 };
@@ -138,27 +138,21 @@ enum post_op_type { sum = 0, eltwise, binary };
 struct post_ops_ok_args_t {
     post_ops_ok_args_t(const cpu_isa_t isa,
             const std::vector<post_op_type> &accepted_post_op_types,
-            const post_ops_t &post_ops);
-
-    post_ops_ok_args_t(const cpu_isa_t isa,
-            const std::vector<post_op_type> &accepted_post_op_types,
-            const post_ops_t &post_ops, const memory_desc_wrapper *dst_d,
-            bool sum_at_pos_0_only, const bool sum_requires_scale_one);
-
-    post_ops_ok_args_t(const cpu_isa_t isa,
-            const std::vector<post_op_type> &accepted_post_op_types,
-            const post_ops_t &post_ops, const memory_desc_wrapper *dst_d);
+            const post_ops_t &post_ops,
+            const memory_desc_wrapper *dst_d = nullptr,
+            const bool sum_at_pos_0_only = false,
+            const bool sum_requires_scale_one = false,
+            const bool sum_requires_zp_zero = true,
+            const bcast_set_t &enabled_bcast_strategy = default_strategies);
 
     const cpu_isa_t isa;
     const std::vector<post_op_type> &accepted_post_op_types;
     const post_ops_t &post_ops;
-    const memory_desc_wrapper *dst_d = nullptr;
-    const bool sum_at_pos_0_only = false;
-    const bool sum_requires_scale_one = false;
-    const bcast_set_t enabled_bcast_strategy
-            = {broadcasting_strategy_t::scalar, broadcasting_strategy_t::per_oc,
-                    broadcasting_strategy_t::per_oc_spatial,
-                    broadcasting_strategy_t::no_broadcast};
+    const memory_desc_wrapper *dst_d;
+    const bool sum_at_pos_0_only;
+    const bool sum_requires_scale_one;
+    const bool sum_requires_zp_zero;
+    const bcast_set_t enabled_bcast_strategy;
 };
 
 bool post_ops_ok(const post_ops_ok_args_t &args);

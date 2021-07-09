@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2019-2020 Intel Corporation
+* Copyright 2019-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -18,8 +18,8 @@
 #define COMMON_PRIMITIVE_CACHE_HPP
 
 #include <future>
-#include <list>
 #include <memory>
+#include <thread>
 #include <unordered_map>
 
 #include "c_types_map.hpp"
@@ -47,8 +47,11 @@ struct primitive_cache_t : public c_compatible {
 
     virtual value_t get_or_add(const key_t &key, const value_t &value) = 0;
     virtual void remove_if_invalidated(const key_t &key) = 0;
+    virtual void update_entry(const key_t &key, const primitive_desc_t *pd) = 0;
 
     virtual int get_size() const = 0;
+
+    virtual std::shared_ptr<primitive_desc_t> get_pd(const key_t &key) = 0;
 
 protected:
     static utils::rw_mutex_t &rw_mutex() {
@@ -73,8 +76,11 @@ struct lru_primitive_cache_t : public primitive_cache_t {
 
     value_t get_or_add(const key_t &key, const value_t &value) override;
     void remove_if_invalidated(const key_t &key) override;
+    void update_entry(const key_t &key, const primitive_desc_t *pd) override;
 
     int get_size() const override;
+
+    std::shared_ptr<primitive_desc_t> get_pd(const key_t &key) override;
 
 private:
     void evict(size_t n);
@@ -82,14 +88,25 @@ private:
     value_t get(const key_t &key);
 
     size_t capacity_;
-    using cache_list_t = std::list<std::pair<key_t, value_t>>;
-    cache_list_t cache_list_;
-    std::unordered_map<key_t, cache_list_t::iterator> cache_mapper_;
+    struct timed_entry_t {
+        value_t value_;
+        std::atomic<size_t> timestamp_;
+        timed_entry_t(const value_t &value, size_t timestamp)
+            : value_(value), timestamp_(timestamp) {}
+    };
+    // Each entry in the cache has a corresponding key and timestamp.
+    // NOTE: pairs that contain atomics cannot be stored in an unordered_map *as
+    // an element*, since it invokes the copy constructor of std::atomic, which
+    // is deleted.
+    std::unordered_map<key_t, timed_entry_t> cache_mapper_;
 };
 
 primitive_cache_t &primitive_cache();
 
+// Undocumented API for testing.
 status_t DNNL_API get_primitive_cache_size(int *size);
+bool DNNL_API is_primitive_in_cache(const primitive_iface_t *p_iface);
+bool DNNL_API is_pd_in_cache(const primitive_desc_iface_t *pd_iface);
 
 } // namespace impl
 } // namespace dnnl

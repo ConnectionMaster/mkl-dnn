@@ -28,17 +28,27 @@ namespace dnnl {
 namespace impl {
 namespace cpu {
 
+static bool is_padding(const memory_desc_wrapper &md) {
+    for (int i = 0; i < md.ndims(); i++)
+        if (md.dims()[i] != md.padded_dims()[i]) return true;
+    return false;
+}
+
 template <impl::data_type_t data_type>
 status_t ref_softmax_fwd_t<data_type>::execute_forward_dense(
         const exec_ctx_t &ctx) const {
-    status_t status = status::success;
     auto src = CTX_IN_MEM(const data_t *, DNNL_ARG_SRC);
-    auto dst = CTX_OUT_CLEAN_MEM(data_t *, DNNL_ARG_DST, status);
-    CHECK(status);
+    auto dst = CTX_OUT_MEM(data_t *, DNNL_ARG_DST);
 
-    const auto ou_stride = pd()->outer_stride();
+    const memory_desc_wrapper data_d(pd()->dst_md());
+    const dim_t ou_stride = pd()->outer_stride();
+    const auto is_inplace = (src == dst);
+    const auto has_padding = is_padding(data_d);
+    const auto zero_padding = has_padding && !is_inplace;
+    const auto axis = pd()->axis();
+    const auto axis_blk_size = data_d.padded_dims()[axis] - data_d.dims()[axis];
 
-    parallel_nd(outer_size_, [&](int ou) {
+    parallel_nd(outer_size_, [&](dim_t ou) {
         const data_t *src_data = src + ou * ou_stride;
         data_t *dst_data = dst + ou * ou_stride;
         float space_max = -FLT_MAX;
@@ -124,6 +134,11 @@ status_t ref_softmax_fwd_t<data_type>::execute_forward_dense(
                 dst_data[c] = dst_data[c] - space_denom;
             }
         }
+        if (zero_padding) {
+            PRAGMA_OMP_SIMD()
+            for (int i = 0; i < axis_blk_size; i++)
+                dst_data[channels_ + i] = 0;
+        }
     });
     return status::success;
 }
@@ -132,14 +147,31 @@ template <impl::data_type_t data_type>
 status_t ref_softmax_fwd_t<data_type>::execute_forward_generic(
         const exec_ctx_t &ctx) const {
 
-    status_t status = status::success;
     auto src = CTX_IN_MEM(const data_t *, DNNL_ARG_SRC);
-    auto dst = CTX_OUT_CLEAN_MEM(data_t *, DNNL_ARG_DST, status);
-    CHECK(status);
+    auto dst = CTX_OUT_MEM(data_t *, DNNL_ARG_DST);
 
     const memory_desc_wrapper data_d(pd()->src_md());
 
-    parallel_nd(outer_size_, [&](int ou) {
+    const auto is_inplace = (src == dst);
+    const auto has_padding = is_padding(data_d);
+    if (has_padding && !is_inplace) {
+        if (data_d.is_dense(true)) {
+            const auto res = std::div(static_cast<int>(data_d.size()), PAGE_4K);
+            if (!res.quot)
+                std::memset(dst, 0, res.rem);
+            else
+                parallel_nd(res.quot, [&](dim_t i) {
+                    const auto tail = (i + 1 == res.quot) ? res.rem : 0;
+                    const auto ptr_dst = reinterpret_cast<unsigned char *>(dst)
+                            + i * PAGE_4K;
+                    std::memset(ptr_dst, 0, PAGE_4K + tail);
+                });
+        } else
+            // needed for submemory correctness
+            ctx.zero_pad_output(DNNL_ARG_DST);
+    }
+
+    parallel_nd(outer_size_, [&](dim_t ou) {
         float space_max_val = 0, space_denom_val = 0;
         float *space_max = &space_max_val, *space_denom = &space_denom_val;
         if (inner_size_ > 1) {
@@ -198,15 +230,13 @@ template struct ref_softmax_fwd_t<data_type::f32>;
 template <impl::data_type_t data_type>
 status_t ref_softmax_bwd_t<data_type>::execute_backward_dense(
         const exec_ctx_t &ctx) const {
-    status_t status = status::success;
     auto dst = CTX_IN_MEM(const data_t *, DNNL_ARG_DST);
     auto diff_dst = CTX_IN_MEM(const data_t *, DNNL_ARG_DIFF_DST);
-    auto diff_src = CTX_OUT_CLEAN_MEM(data_t *, DNNL_ARG_DIFF_SRC, status);
-    CHECK(status);
+    auto diff_src = CTX_OUT_MEM(data_t *, DNNL_ARG_DIFF_SRC);
 
     const auto ou_stride = pd()->outer_stride();
 
-    parallel_nd(outer_size_, [&](int ou) {
+    parallel_nd(outer_size_, [&](dim_t ou) {
         float sbr = 0;
         size_t off = ou * ou_stride;
         if (pd()->is_softmax()) {
@@ -227,16 +257,34 @@ status_t ref_softmax_bwd_t<data_type>::execute_backward_dense(
 template <impl::data_type_t data_type>
 status_t ref_softmax_bwd_t<data_type>::execute_backward_generic(
         const exec_ctx_t &ctx) const {
-    status_t status = status::success;
     auto dst = CTX_IN_MEM(const data_t *, DNNL_ARG_DST);
     auto diff_dst = CTX_IN_MEM(const data_t *, DNNL_ARG_DIFF_DST);
-    auto diff_src = CTX_OUT_CLEAN_MEM(data_t *, DNNL_ARG_DIFF_SRC, status);
-    CHECK(status);
+    auto diff_src = CTX_OUT_MEM(data_t *, DNNL_ARG_DIFF_SRC);
 
     const memory_desc_wrapper diff_d(pd()->diff_src_md());
     const memory_desc_wrapper data_d(pd()->dst_md());
 
-    parallel_nd(outer_size_, inner_size_, [&](int ou, int in) {
+    const auto is_inplace = (diff_dst == diff_src);
+    const auto has_padding = is_padding(diff_d);
+    if (has_padding && !is_inplace) {
+        if (diff_d.is_dense(true)) {
+            const auto res = std::div(static_cast<int>(diff_d.size()), PAGE_4K);
+            if (!res.quot)
+                std::memset(diff_src, 0, res.rem);
+            else
+                parallel_nd(res.quot, [&](dim_t i) {
+                    const auto tail = (i + 1 == res.quot) ? res.rem : 0;
+                    const auto ptr_dst
+                            = reinterpret_cast<unsigned char *>(diff_src)
+                            + i * PAGE_4K;
+                    std::memset(ptr_dst, 0, PAGE_4K + tail);
+                });
+        } else
+            // needed for submemory correctness
+            ctx.zero_pad_output(DNNL_ARG_DIFF_SRC);
+    }
+
+    parallel_nd(outer_size_, inner_size_, [&](dim_t ou, dim_t in) {
         dim_t ou_in_offset = ou * channels_ * inner_size_ + in;
         float sbr = 0;
         for (int c = 0; c < channels_; ++c) {

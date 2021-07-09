@@ -1,5 +1,5 @@
 /*******************************************************************************
-* Copyright 2020 Intel Corporation
+* Copyright 2020-2021 Intel Corporation
 *
 * Licensed under the Apache License, Version 2.0 (the "License");
 * you may not use this file except in compliance with the License.
@@ -35,6 +35,7 @@ namespace gpu {
 namespace ocl {
 
 struct gen9_sum_t : public gpu_primitive_t {
+    using gpu_primitive_t::gpu_primitive_t;
     struct pd_t : public gpu_sum_pd_t {
         using gpu_sum_pd_t::gpu_sum_pd_t;
 
@@ -60,8 +61,6 @@ struct gen9_sum_t : public gpu_primitive_t {
         }
     };
 
-    gen9_sum_t(const pd_t *apd) : gpu_primitive_t(apd) {}
-
     status_t init(engine_t *engine) override {
         compute::kernel_ctx_t kernel_ctx;
 
@@ -72,7 +71,7 @@ struct gen9_sum_t : public gpu_primitive_t {
 
         kernel_ctx.define_int("VECT_DT_N", vector_size);
         kernel_ctx.define_int("N_INPUTS", pd()->n_inputs());
-        kernel_ctx.define_int("N_ELEMS", data_d.nelems());
+        kernel_ctx.define_int("N_ELEMS", data_d.nelems(true));
 
         def_memory_desc_info(
                 kernel_ctx, memory_desc_info_t::create(data_d), "SRC");
